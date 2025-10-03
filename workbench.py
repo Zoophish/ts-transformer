@@ -16,7 +16,7 @@ if __name__ == '__main__':
     try:
         sys.path.append(base_path)
         from src.lightning.lightning_module import ProbablisticTransformerLightning
-        from src.dataset.synthetic import sinusoidal
+        from src.dataset.synthetic import sinusoidal, linear
         from src.dataset.torch_datasets import IntervalDataset, collate_pad
         from src.dataset.utils import partition
     except ImportError:
@@ -25,17 +25,18 @@ if __name__ == '__main__':
     BATCH_SIZE = 64
     TRAIN_RATIO = 0.8
     MAX_EPOCHS = 100
-    PATIENCE = 12
+    PATIENCE = 16
     MIN_LOSS_DELTA = 0.05
 
-    LEARNING_RATE = 2e-4
+    LEARNING_RATE = 1e-4
     L2_LAMBDA = 0.0001
 
     TRAIN_CXT_SIZE = 128
     TEST_CXT_SIZE = 128
 
-    synthetic_series_len = 1024 * 10
-    time_series = sinusoidal(synthetic_series_len, 1, 0.04, 0, 0.1) + 1
+    synthetic_series_len = 1024 * 20
+    time_series = sinusoidal(synthetic_series_len, 1, 0.04, 0, 0.1) + sinusoidal(synthetic_series_len, 1, 0.004, 0, 0.1)
+    plt.plot(time_series); plt.show()
 
     train_ts, val_ts = partition(time_series, TRAIN_RATIO)
 
@@ -98,10 +99,10 @@ if __name__ == '__main__':
     y = []
     with torch.no_grad():
         for i in range(horizon_len):
-            out = model(X.unsqueeze(0).unsqueeze(-1))
+            out = model(X.unsqueeze(0).unsqueeze(-1), is_inference=True)
             sample = out['dist'].sample()[0, -1, 0]
             y.append(sample.cpu())
-            X = torch.cat([X, sample.unsqueeze(0)])
+            X = sample.unsqueeze(0)
 
     plt.plot(y_true, label='Target')
     plt.plot(y, label='Prediction')

@@ -31,13 +31,14 @@ class RotaryPositionalEncoding(nn.Module):
         self.register_buffer("sin_cached", sin_cached, persistent=False)
         self.max_seq_len_cached = seq_len
 
-    def forward(self, x : torch.Tensor):
+    def forward(self, x : torch.Tensor, start_pos=0):
         batch_size, n_head, seq_len, dim = x.shape
-        if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len, device=x.device)
+        # support a start pos so kv caching can be used
+        if seq_len + start_pos > self.max_seq_len_cached:
+            self._set_cos_sin_cache(seq_len + start_pos, device=x.device)
         # add singleton dimensions for batch and attn heads
-        cos = self.cos_cached[None, None, :seq_len, ...]
-        sin = self.sin_cached[None, None, :seq_len, ...]
+        cos = self.cos_cached[None, None, start_pos:seq_len+start_pos, ...]
+        sin = self.sin_cached[None, None, start_pos:seq_len+start_pos, ...]
 
         # computationally efficient form of rotary matrix multiplication
         x_half_1 = x[..., 0::2]  # get every even indexed element
@@ -69,8 +70,10 @@ class Attention(nn.Module):
         self.W_k = nn.Linear(dim, dim, bias=False)
         self.W_v = nn.Linear(dim, dim, bias=False)
         self.W_o = nn.Linear(dim, dim, bias=False)
+
         self.rope = RotaryPositionalEncoding(self.head_dim)
         self.attn_dropout = nn.Dropout(dropout)
+        self.kv_cache = None
 
     def scaled_dot_product_attention(self, q, k, v, mask):
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
@@ -80,7 +83,7 @@ class Attention(nn.Module):
         attention_weights = self.attn_dropout(F.softmax(scores, dim=-1))
         return torch.matmul(attention_weights, v)
 
-    def forward(self, x : torch.Tensor, mask=None):
+    def forward(self, x : torch.Tensor, mask=None, use_kv_cache = False):
         batch_size, seq_len, n_feat = x.shape
         # generate query, key and value for every token in seq
         q = self.W_q(x)
@@ -90,16 +93,28 @@ class Attention(nn.Module):
         q = q.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         k = k.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         v = v.view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
+        # at inference, need to provide offset
+        start_pos = 0
+        if self.kv_cache is not None:
+            start_pos = self.kv_cache[0].shape[2]
         # apply RoPE
-        q = self.rope(q)
-        k = self.rope(k)
+        q = self.rope(q, start_pos)
+        k = self.rope(k, start_pos)
+        # at inference k,v,q are of length 1; the new q must look at the old and new k, v
+        if self.kv_cache is not None:
+            k_cache, v_cache = self.kv_cache
+            k = torch.cat([k_cache, k], dim=2)
+            v = torch.cat([v_cache, v], dim=2)
+        if use_kv_cache:
+            self.kv_cache = k, v
         # dot product attention
         match self.imp:
             case 'internal':
                 output = self.scaled_dot_product_attention(q, k, v, mask)
             case 'torch':
                 dropout_p = self.dropout_p if self.training else 0.0
-                output = F.scaled_dot_product_attention(q, k, v, ~mask.unsqueeze(1), dropout_p)
+                mask = ~mask.unsqueeze(1) if not use_kv_cache else None
+                output = F.scaled_dot_product_attention(q, k, v, mask, dropout_p)
 
         # transpose back to original dims, ensure contiguity before creating view
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
@@ -129,10 +144,13 @@ class EncoderLayer(nn.Module):
         self.layer_norm2 = nn.RMSNorm(d_model)
         self.dropout = nn.Dropout(p=dropout)
 
-    def forward(self, x : torch.Tensor, mask=None):
+    def reset_kv_cache(self):
+        self.attention.kv_cache = None
+
+    def forward(self, x : torch.Tensor, mask=None, use_kv_cache=False):
         # apply pre-layer normalisation
         normed_x = self.layer_norm1(x)
-        attn = self.attention(normed_x, mask)
+        attn = self.attention(normed_x, mask, use_kv_cache)
         x = x + self.dropout(attn)
 
         normed_x = self.layer_norm2(x)
@@ -171,19 +189,29 @@ class DecoderTransformer(nn.Module):
         mask = torch.triu(torch.ones(sz, sz, device=device), diagonal=1).bool()
         return mask
     
-    def forward(self, x : torch.Tensor, mask=None):
+    def reset_kv_cache(self):
+        for decoder_block in self.decoder_blocks:
+            decoder_block.reset_kv_cache()
+    
+    def forward(self, x : torch.Tensor, mask=None, is_inference=False):
         seq_len = x.size(1)
-        # the causal mask extends across the batch dim
-        total_mask = self._generate_causal_mask(seq_len, x.device).unsqueeze(0)
-        if mask is not None:
-            # mask extends across the key dim
-            total_mask = total_mask | mask.unsqueeze(1)
+
+        if not is_inference:
+            # the causal mask extends across the batch dim
+            causal_mask = self._generate_causal_mask(seq_len, x.device).unsqueeze(0)
+            if mask is None:
+                mask = causal_mask
+            else:
+                # combine causal mask with mask (extended across the key dim)
+                mask = mask.unsqueeze(1) | causal_mask
+
         # project the input (tokens) to the embedding dimension
         x = self.input_projection(x)
+
         # process each decoder block
         decoder_out = x
         for decoder_block in self.decoder_blocks:
-            decoder_out = decoder_block(decoder_out, total_mask)
+            decoder_out = decoder_block(decoder_out, mask, use_kv_cache=is_inference)
         # apply output layer
         out = self.fc(decoder_out)
         return out

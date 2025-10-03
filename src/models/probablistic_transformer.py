@@ -44,7 +44,8 @@ class ProbablisticTransformer(nn.Module):
             self,
             x: torch.Tensor,
             pad_mask: torch.Tensor = None,
-            targets: torch.Tensor = None
+            targets: torch.Tensor = None,
+            is_inference: bool = False
         ):
         """
         Predict the distribution of possible next steps.
@@ -52,7 +53,7 @@ class ProbablisticTransformer(nn.Module):
             - "dist": The distribution prediction.
             - "loss": The NLL loss, if targets are provided, else None.
         """
-        hidden_states = self.model(x, pad_mask)
+        hidden_states = self.model(x, pad_mask, is_inference=is_inference)
         outputs = self.dist_head(hidden_states, targets)
         return outputs
     
