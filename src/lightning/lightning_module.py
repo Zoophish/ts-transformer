@@ -38,6 +38,9 @@ class ProbablisticTransformerLightning(L.LightningModule):
             dist_cls=dist_cls
         )
 
+    def reset_kv_cache(self):
+        self.model.reset_kv_cache()
+
     def forward(
             self, x : torch.tensor,
             pad_mask : torch.Tensor = None,

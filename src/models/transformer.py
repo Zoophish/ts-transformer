@@ -35,7 +35,7 @@ class RotaryPositionalEncoding(nn.Module):
         batch_size, n_head, seq_len, dim = x.shape
         # support a start pos so kv caching can be used
         if seq_len + start_pos > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len + start_pos, device=x.device)
+            self._set_cos_sin_cache(seq_len + start_pos)
         # add singleton dimensions for batch and attn heads
         cos = self.cos_cached[None, None, start_pos:seq_len+start_pos, ...]
         sin = self.sin_cached[None, None, start_pos:seq_len+start_pos, ...]
