@@ -5,6 +5,7 @@ Workbench is intended for quick ad hoc experiments using the lightning modules.
 import sys
 import os
 import torch
+import torch.distributions.constraints as constraints
 import numpy as np
 import pandas as pd
 import pytorch_lightning as L
@@ -32,14 +33,16 @@ if __name__ == '__main__':
     LEARNING_RATE = 2e-4
     L2_LAMBDA = 1e-4
 
-    TRAIN_CXT_SIZE = 128
-    TEST_CXT_SIZE = 128
+    TRAIN_CXT_SIZE = 256
+    TEST_CXT_SIZE = 256
     MODE = {'train', 'plot'}
 
     series_len = 1024 * 20
     time_series = sinusoidal(series_len, 1, 0.04, 0, 0.1) + 1
+    df = pd.DataFrame(time_series)
+    df.to_parquet('sinusoidal.parquet')
 
-    plt.plot(time_series); plt.show()
+    # plt.plot(time_series); plt.show()
 
     train_ts, val_ts = partition(time_series, TRAIN_RATIO)
 
@@ -61,6 +64,9 @@ if __name__ == '__main__':
         l2_lambda=L2_LAMBDA,
         dist_cls=torch.distributions.StudentT
     )
+
+    # manually limit the T distribution's degrees of freedom
+    model.model.dist_head.const_overrides['df'] = constraints.greater_than(lower_bound=2.1)
 
     early_stopper = EarlyStopping(
         monitor="val_loss",
@@ -105,14 +111,7 @@ if __name__ == '__main__':
         X = X.repeat(mc_samples, 1).unsqueeze(-1)
         y_true = val_ts[context_len:context_len + horizon_len]
 
-        y = torch.zeros(mc_samples, horizon_len, n_feat)
-        with torch.no_grad():
-            for i in range(horizon_len):
-                out = model(X, is_inference=True)
-                sample = out['dist'].sample()[:, -1:, :]
-                y[:, i:, :] = sample[:, :, :].cpu()
-                X = sample
-            model.reset_kv_cache()
+        y = model.generate(X, horizon_len).cpu()
 
         quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
         q_values = np.quantile(y[:, :, 0], q=quantiles, axis=0)

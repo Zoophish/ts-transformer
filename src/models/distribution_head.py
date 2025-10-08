@@ -1,4 +1,4 @@
-from typing import Type
+from typing import Type, Dict
 import torch
 import torch.nn as nn
 from torch.distributions import Normal, Distribution, constraints
@@ -37,18 +37,22 @@ class DistributionHead(nn.Module):
     """
     A general-purpose distribution head that maps hidden states to the parameters
     of a specified torch.distributions class.
+    Automatically applies distribution arg constraints to parameter outputs.
+    Named constraints can be overriden using the `const_overrides` dict.
     """
     def __init__(
         self,
         in_dim: int,
         out_dim: int = 1,
         distr_cls: Type[Distribution] = Normal,
-        eps: float = 1e-6
+        const_overrides: Dict[str, constraints.Constraint] = {},
+        eps: float = 1e-5
     ):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
         self.distr_cls = distr_cls
+        self.const_overrides = const_overrides
         self.eps = eps
 
         # discover parameter names and constraints from the distribution class
@@ -66,13 +70,11 @@ class DistributionHead(nn.Module):
         """
         constrained_params = {}
         for name, value in raw_params.items():
-            constraint = self.distr_cls.arg_constraints[name]
+            # override the constraint if it's specified
+            constraint = self.const_overrides.get(name, self.distr_cls.arg_constraints[name])
             if isinstance(constraint, constraints._PositiveDefinite):
                 constrained_params[name] = F.softplus(value) + self.eps
             elif isinstance(constraint, constraints._GreaterThan):
-                if constraint.lower_bound == 0:
-                    constrained_params[name] = F.softplus(value) + self.eps
-                else:
                     constrained_params[name] = constraint.lower_bound + F.softplus(value) + self.eps
             else:
                 # unconstrained params

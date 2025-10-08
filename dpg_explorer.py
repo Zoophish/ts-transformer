@@ -3,6 +3,7 @@ import sys
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributions.constraints as constraints
 import dearpygui.dearpygui as dpg
 from datetime import datetime
 
@@ -13,6 +14,9 @@ try:
     from src.lightning.lightning_module import ProbablisticTransformerLightning
 except ImportError:
     print("Warning: Could not import ProbablisticTransformerLightning.")
+
+# for reproducibility in sampling
+torch.manual_seed(0)
 
 
 
@@ -27,6 +31,7 @@ class TimeSeriesExplorerDPG:
 
         self.tags = {}
         self.plot_themes = {}
+        self.colormaps = {}
 
         self.plot_colors = {
             'context':      (0, 0, 255, 255),
@@ -46,6 +51,10 @@ class TimeSeriesExplorerDPG:
                     # style for fills (used by shade_series)
                     dpg.add_theme_color(dpg.mvPlotCol_Fill, color, category=dpg.mvThemeCat_Plots)
             self.plot_themes[name] = theme
+
+        with dpg.colormap_registry():
+            colors = [[255, 0, 0, 0], [255, 0, 0, 127], [255, 0, 0, 255]]
+            dpg.add_colormap(colors, qualitative=False, tag="transparent_red")
 
     def _log(self, message: str, level: str = 'info'):
         """Adds a color-coded message to the log console."""
@@ -75,7 +84,8 @@ class TimeSeriesExplorerDPG:
             'mc_samples_input': dpg.generate_uuid(),
             'start_pos_input': dpg.generate_uuid(),
             'log_window': dpg.generate_uuid(),
-            'log_group': dpg.generate_uuid()
+            'log_group': dpg.generate_uuid(),
+            'view_mode_combo': dpg.generate_uuid(),
         }
         self._setup_plot_themes()
         with dpg.window(label="Main", tag="primary_window"):
@@ -109,6 +119,15 @@ class TimeSeriesExplorerDPG:
                         dpg.add_input_int(label="Horizon", default_value=128, tag=self.tags['horizon_input'])
                         dpg.add_input_int(label="MC Samples", default_value=16, tag=self.tags['mc_samples_input'])
                         dpg.add_input_int(label="Start Position", default_value=0, tag=self.tags['start_pos_input'])
+
+                    with dpg.collapsing_header(label="View Options", default_open=True):
+                        dpg.add_combo(
+                            label="Forecast View",
+                            items=['Quantiles', 'Spaghetti', 'Box Count'],
+                            default_value='Quantiles',
+                            tag=self.tags['view_mode_combo'],
+                            callback=self._update_plot()
+                        )
 
                     dpg.add_spacer(height=10)
                     dpg.add_button(label="Recalculate & Plot", width=-1, height=40, callback=self._update_plot)
@@ -190,40 +209,67 @@ class TimeSeriesExplorerDPG:
         X_context = torch.tensor(self.ts_data[start_pos - context_len : start_pos], dtype=torch.float32, device=self.device)
         X = X_context.repeat(mc_samples, 1).unsqueeze(-1)
         y_true = self.ts_data[start_pos : start_pos + horizon_len]
-        y_pred = torch.zeros(mc_samples, horizon_len, 1)
 
         try:
-            with torch.no_grad():
-                for i in range(horizon_len):
-                    out = self.model(X, is_inference=True)
-                    sample = out['dist'].sample()[:, -1:, :]
-                    y_pred[:, i:, :] = sample[:, :, :].cpu()
-                    X = sample
-                self.model.reset_kv_cache()
+            y_pred = self.model.generate(X, horizon_len).cpu()
         except Exception as e:
             self._clear_plot()
             self._log(f"Model Inference Exception: {e}", level='error')
             return
         
         # plotting
-        quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
-        q_values = np.quantile(y_pred.numpy()[:, :, 0], q=quantiles, axis=0)
         
         t_context = np.arange(start_pos - context_len, start_pos)
         t_horizon = np.arange(start_pos, start_pos + horizon_len)
         context_data = self.ts_data[start_pos - context_len : start_pos]
 
-        series_90_ci = dpg.add_shade_series(list(t_horizon), q_values[0].tolist(), y2=q_values[4].tolist(), label='90% CI', parent=self.tags['plot_yaxis'])
-        series_50_ci = dpg.add_shade_series(list(t_horizon), q_values[1].tolist(), y2=q_values[3].tolist(), label='50% CI (IQR)', parent=self.tags['plot_yaxis'])
         series_context = dpg.add_line_series(list(t_context), context_data.tolist(), label='Context', parent=self.tags['plot_yaxis'])
-        series_median = dpg.add_line_series(list(t_horizon), q_values[2].tolist(), label='Median Forecast', parent=self.tags['plot_yaxis'])
         series_truth = dpg.add_line_series(list(t_horizon), y_true.tolist(), label='Ground Truth', parent=self.tags['plot_yaxis'])
-
-        dpg.bind_item_theme(series_90_ci, self.plot_themes['ci_90'])
-        dpg.bind_item_theme(series_50_ci, self.plot_themes['ci_50'])
         dpg.bind_item_theme(series_context, self.plot_themes['context'])
-        dpg.bind_item_theme(series_median, self.plot_themes['median'])
         dpg.bind_item_theme(series_truth, self.plot_themes['ground_truth'])
+
+        match dpg.get_value(self.tags['view_mode_combo']):
+            case 'Quantiles':
+                quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
+                q_values = np.quantile(y_pred.numpy()[:, :, 0], q=quantiles, axis=0)
+                series_90_ci = dpg.add_shade_series(list(t_horizon), q_values[0].tolist(), y2=q_values[4].tolist(), label='90% CI', parent=self.tags['plot_yaxis'])
+                series_50_ci = dpg.add_shade_series(list(t_horizon), q_values[1].tolist(), y2=q_values[3].tolist(), label='50% CI (IQR)', parent=self.tags['plot_yaxis'])
+                series_median = dpg.add_line_series(list(t_horizon), q_values[2].tolist(), label='Median Forecast', parent=self.tags['plot_yaxis'])
+
+                dpg.bind_item_theme(series_90_ci, self.plot_themes['ci_90'])
+                dpg.bind_item_theme(series_50_ci, self.plot_themes['ci_50'])
+                dpg.bind_item_theme(series_median, self.plot_themes['median'])
+            case 'Spaghetti':
+                for i in range(mc_samples):
+                    label = 'Forecast Samples' if i == 0 else ''
+                    series = dpg.add_line_series(
+                        list(t_horizon), 
+                        y_pred[i, :, 0].numpy().tolist(), 
+                        label=label, 
+                        parent=self.tags['plot_yaxis']
+                    )
+                    dpg.bind_item_theme(series, self.plot_themes['ci_90'])
+            case 'Box Count':
+                num_bins = 32
+                forecasts = y_pred[:, :, 0].numpy()
+                y_min, y_max = forecasts.min(), forecasts.max()
+                counts = np.apply_along_axis(
+                    lambda x: np.histogram(x, bins=num_bins, range=(y_min, y_max))[0],
+                    axis=0,
+                    arr=forecasts
+                )
+                heat_series = dpg.add_heat_series(
+                    counts.flatten().tolist(),
+                    rows=num_bins,
+                    cols=horizon_len,
+                    bounds_min=(t_horizon[0], y_min),
+                    bounds_max=(t_horizon[-1], y_max),
+                    parent=self.tags['plot_yaxis'],
+                    label="Forecast Distribution",
+                    format=''
+                )
+                # dpg.bind_colormap(heat_series, dpg.mvPlotColormap_Hot)
+                
 
         dpg.set_item_label(self.tags['plot'], f"Forecast for '{self.target_col}'")
         dpg.fit_axis_data(self.tags['plot_xaxis'])
@@ -257,6 +303,7 @@ if __name__ == '__main__':
         raise RuntimeError("Could not load model.")
 
     model.eval()
+    model.model.dist_head.const_overrides['df'] = constraints.greater_than(lower_bound=2.1)
     
     explorer = TimeSeriesExplorerDPG(model=model)
     explorer.run()

@@ -45,9 +45,20 @@ class ProbablisticTransformerLightning(L.LightningModule):
             self, x : torch.tensor,
             pad_mask : torch.Tensor = None,
             targets : torch.Tensor = None,
-            is_inference : bool = False
         ):
-        return self.model(x, pad_mask, targets, is_inference)
+        return self.model(x, pad_mask, targets)
+    
+    def generate(
+        self,
+        context: torch.Tensor,
+        horizon_len: int,
+        pad_mask: torch.Tensor = None
+    ):
+        return self.model.generate(
+            context,
+            horizon_len,
+            pad_mask
+        )
     
     def compute_loss(self, batch):
         window_batch, pad_mask = batch
