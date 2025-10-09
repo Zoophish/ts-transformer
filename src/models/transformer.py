@@ -55,7 +55,14 @@ class Attention(nn.Module):
     The Torch scaled dot product attention used by default, but an internal method
     is available for educational purposes.
     """
-    def __init__(self, dim : int, n_head : int, imp='torch', dropout=0.0):
+    def __init__(
+            self,
+            dim : int,
+            n_head : int,
+            dropout : float = 0.0,
+            dropout_modes : set = {'weights'},
+            imp : str ='torch'
+        ):
         super().__init__()
 
         if dim % n_head != 0:
@@ -63,6 +70,8 @@ class Attention(nn.Module):
         self.n_head = n_head
         self.head_dim = dim // n_head
         self.dropout_p = dropout
+        self.dropout_modes = dropout_modes
+        self.force_dropout = False
         self.imp = imp
         
         # query, key, value, output matrices
@@ -72,15 +81,18 @@ class Attention(nn.Module):
         self.W_o = nn.Linear(dim, dim, bias=False)
 
         self.rope = RotaryPositionalEncoding(self.head_dim)
-        self.attn_dropout = nn.Dropout(dropout)
         self.kv_cache = None
 
-    def scaled_dot_product_attention(self, q, k, v, mask):
+    @property
+    def use_dropout(self):
+        return self.training or self.force_dropout
+
+    def scaled_dot_product_attention(self, q, k, v, mask, dropout_p = 0.0):
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
         if mask is not None:
             mask = mask.unsqueeze(1)  # extend the mask across attn head dim
             scores = scores.masked_fill(mask, float('-inf'))  # note, true -> -inf
-        attention_weights = self.attn_dropout(F.softmax(scores, dim=-1))
+        attention_weights = F.dropout(F.softmax(scores, dim=-1), dropout_p)
         return torch.matmul(attention_weights, v)
 
     def forward(self, x : torch.Tensor, mask=None, use_kv_cache = False):
@@ -108,13 +120,13 @@ class Attention(nn.Module):
         if use_kv_cache:
             self.kv_cache = k, v
         # dot product attention
+        weights_dropout = self.dropout_p if self.use_dropout and 'weights' in self.dropout_modes else 0
         match self.imp:
             case 'internal':
-                output = self.scaled_dot_product_attention(q, k, v, mask)
+                output = self.scaled_dot_product_attention(q, k, v, mask, weights_dropout)
             case 'torch':
-                dropout_p = self.dropout_p if self.training else 0.0
                 mask = ~mask.unsqueeze(1) if not use_kv_cache else None
-                output = F.scaled_dot_product_attention(q, k, v, mask, dropout_p)
+                output = F.scaled_dot_product_attention(q, k, v, mask, weights_dropout)
 
         # transpose back to original dims, ensure contiguity before creating view
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
@@ -139,8 +151,7 @@ class MLP(nn.Module):
 
 class GatedLinearUnit(nn.Module):
     """
-    Gated Linear Unit (GLU) for dynamically controlling intra-token information
-    flow. Can use either SiLU or GELU activation to achieve SwiGLU and GEGLU.
+    Gated Linear Unit (GLU) which sort of does dynamic intra-token information flow.
     """
     def __init__(self, d_model : int, d_ff : int, activation = F.silu):
         super().__init__()

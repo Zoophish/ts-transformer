@@ -47,6 +47,14 @@ class ProbablisticTransformer(nn.Module):
     def reset_kv_cache(self):
         self.model.reset_kv_cache()
 
+    def enable_dropout(self):
+        """
+        Reactivates dropout for inference. Must be called after calls to eval().
+        """
+        for decoder_block in self.model.decoder_blocks:
+            decoder_block.attention.force_dropout = True
+            decoder_block.dropout.train()
+
     def forward(
             self,
             x: torch.Tensor,

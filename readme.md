@@ -18,7 +18,10 @@
 
 ## Model Details
 ### Instance Normalisation
-To try and address input scaling, each input sequence is standardised via an instance normalisation layer. The model learns to predict in the normalised space of the context. An inverse denormalisation is applied to the output samples to transform back to the original space. At inference, it would be correct to refit the normalisation layer on the context and the models own predictons (autoregressive). However, doing so would invalidate the KV cache. Therefore, the KV cache is kept for performance and the normalisation statistics are only gathered from the initial context.
+To try and address input scaling, each input sequence is standardised via an instance normalisation layer. The model learns to make predictions in the normalised space of the context. An inverse denormalisation step is applied to the output samples to transform back to the context space. At inference, it would be correct to refit the normalisation layer on the context and the models own predictons (fully autoregressive). However, doing so would invalidate the KV cache which is very useful for inference performance. Therefore, is it assumed the initial context is representative enough and normalisation statistics are only gathered from the initial context.
+
+### Dropout
+Dropout is applied to the softmax in the attention mechansim, as well as to the outputs of the attention and the FFN units.
 
 ## To do:
 - MC dropout
