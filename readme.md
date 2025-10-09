@@ -9,9 +9,10 @@
 
 ## Transformer Architecture
 - Decoder only (GPT-style)
-- RMSNorm pre-normalisation on FFN
 - Rotary Positional Embeddings (RoPE)
 - Accelerated scaled dot product attention via Torch Flash Attention implementation
+- RMSNorm pre-normalisation on FFN
+- Gated Linear Unit FFN (SwiGLU/GeGLU)
 - Key value caching
 
 
@@ -20,7 +21,6 @@
 To try and address input scaling, each input sequence is standardised via an instance normalisation layer. The model learns to predict in the normalised space of the context. An inverse denormalisation is applied to the output samples to transform back to the original space. At inference, it would be correct to refit the normalisation layer on the context and the models own predictons (autoregressive). However, doing so would invalidate the KV cache. Therefore, the KV cache is kept for performance and the normalisation statistics are only gathered from the initial context.
 
 ## To do:
-- SwiGLU FFN
 - MC dropout
 - Scheduled sampling
 

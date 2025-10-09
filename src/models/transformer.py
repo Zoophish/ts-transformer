@@ -123,6 +123,40 @@ class Attention(nn.Module):
         return output
 
 
+class MLP(nn.Module):
+    """
+    Can be used inplace of GLU in EncoderLayer. Here for completeness.
+    """
+    def __init__(self, d_model : int, d_ff : int, activation = F.silu):
+        super().__init__()
+        self.fc1 = nn.Linear(d_model, d_ff, bias=False)
+        self.fc2 = nn.Linear(d_ff, d_model, bias=False)
+        self.activation = activation
+
+    def forward(self, x : torch.Tensor):
+        return self.fc2(self.activation(self.fc1(x)))
+
+
+class GatedLinearUnit(nn.Module):
+    """
+    Gated Linear Unit (GLU) for dynamically controlling intra-token information
+    flow. Can use either SiLU or GELU activation to achieve SwiGLU and GEGLU.
+    """
+    def __init__(self, d_model : int, d_ff : int, activation = F.silu):
+        super().__init__()
+        self.gate_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.up_proj = nn.Linear(d_model, d_ff, bias=False)
+        self.down_proj = nn.Linear(d_ff, d_model, bias=False)
+        self.activation = activation
+
+    def forward(self, x : torch.Tensor):
+        gate = self.gate_proj(x)
+        up = self.up_proj(x)
+        activated_gate = self.activation(gate)
+        gated_output = activated_gate * up
+        return self.down_proj(gated_output)
+
+
 class EncoderLayer(nn.Module):
     def __init__(
             self,
@@ -137,9 +171,7 @@ class EncoderLayer(nn.Module):
             n_head,
             imp='torch'
         )
-        self.fc1 = nn.Linear(d_model, d_ff, bias=False)
-        self.fc2 = nn.Linear(d_ff, d_model, bias=False)
-        self.activation = nn.SiLU()
+        self.ffn = GatedLinearUnit(d_model, d_ff)
         self.layer_norm1 = nn.RMSNorm(d_model)
         self.layer_norm2 = nn.RMSNorm(d_model)
         self.dropout = nn.Dropout(p=dropout)
@@ -148,13 +180,13 @@ class EncoderLayer(nn.Module):
         self.attention.kv_cache = None
 
     def forward(self, x : torch.Tensor, mask=None, use_kv_cache=False):
-        # apply pre-layer normalisation
+        # pre-layer normalisation
         normed_x = self.layer_norm1(x)
         attn = self.attention(normed_x, mask, use_kv_cache)
         x = x + self.dropout(attn)
 
         normed_x = self.layer_norm2(x)
-        ff_out = self.fc2(self.activation(self.fc1(normed_x)))
+        ff_out = self.ffn(normed_x)
         x = x + self.dropout(ff_out)
         return x
 
