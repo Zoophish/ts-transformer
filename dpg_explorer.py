@@ -52,9 +52,9 @@ class TimeSeriesExplorerDPG:
                     dpg.add_theme_color(dpg.mvPlotCol_Fill, color, category=dpg.mvThemeCat_Plots)
             self.plot_themes[name] = theme
 
-        with dpg.colormap_registry():
-            colors = [[255, 0, 0, 0], [255, 0, 0, 127], [255, 0, 0, 255]]
-            dpg.add_colormap(colors, qualitative=False, tag="transparent_red")
+        # with dpg.colormap_registry():
+        #     colors = [[255, 0, 0, 0], [255, 0, 0, 127], [255, 0, 0, 255]]
+        #     dpg.add_colormap(colors, qualitative=False, tag="transparent_red")
 
     def _log(self, message: str, level: str = 'info'):
         """Adds a color-coded message to the log console."""
@@ -83,6 +83,7 @@ class TimeSeriesExplorerDPG:
             'horizon_input': dpg.generate_uuid(),
             'mc_samples_input': dpg.generate_uuid(),
             'start_pos_input': dpg.generate_uuid(),
+            'use_mcd': dpg.generate_uuid(),
             'log_window': dpg.generate_uuid(),
             'log_group': dpg.generate_uuid(),
             'view_mode_combo': dpg.generate_uuid(),
@@ -119,6 +120,7 @@ class TimeSeriesExplorerDPG:
                         dpg.add_input_int(label="Horizon", default_value=128, tag=self.tags['horizon_input'])
                         dpg.add_input_int(label="MC Samples", default_value=16, tag=self.tags['mc_samples_input'])
                         dpg.add_input_int(label="Start Position", default_value=0, tag=self.tags['start_pos_input'])
+                        dpg.add_checkbox(label='Use MCD', default_value=False, tag=self.tags['use_mcd'])
 
                     with dpg.collapsing_header(label="View Options", default_open=True):
                         dpg.add_combo(
@@ -211,22 +213,20 @@ class TimeSeriesExplorerDPG:
         y_true = self.ts_data[start_pos : start_pos + horizon_len]
 
         try:
-            y_pred = self.model.generate(X, horizon_len).cpu()
+            y_pred = self.model.generate(
+                X,
+                horizon_len,
+                use_mcd=dpg.get_value(self.tags['use_mcd'])
+            ).cpu()
         except Exception as e:
             self._clear_plot()
             self._log(f"Model Inference Exception: {e}", level='error')
             return
         
         # plotting
-        
         t_context = np.arange(start_pos - context_len, start_pos)
         t_horizon = np.arange(start_pos, start_pos + horizon_len)
         context_data = self.ts_data[start_pos - context_len : start_pos]
-
-        series_context = dpg.add_line_series(list(t_context), context_data.tolist(), label='Context', parent=self.tags['plot_yaxis'])
-        series_truth = dpg.add_line_series(list(t_horizon), y_true.tolist(), label='Ground Truth', parent=self.tags['plot_yaxis'])
-        dpg.bind_item_theme(series_context, self.plot_themes['context'])
-        dpg.bind_item_theme(series_truth, self.plot_themes['ground_truth'])
 
         match dpg.get_value(self.tags['view_mode_combo']):
             case 'Quantiles':
@@ -250,7 +250,7 @@ class TimeSeriesExplorerDPG:
                     )
                     dpg.bind_item_theme(series, self.plot_themes['ci_90'])
             case 'Box Count':
-                num_bins = 32
+                num_bins = mc_samples // 10
                 forecasts = y_pred[:, :, 0].numpy()
                 y_min, y_max = forecasts.min(), forecasts.max()
                 counts = np.apply_along_axis(
@@ -258,18 +258,23 @@ class TimeSeriesExplorerDPG:
                     axis=0,
                     arr=forecasts
                 )
-                heat_series = dpg.add_heat_series(
+                dpg.add_heat_series(
                     counts.flatten().tolist(),
                     rows=num_bins,
                     cols=horizon_len,
                     bounds_min=(t_horizon[0], y_min),
                     bounds_max=(t_horizon[-1], y_max),
+                    scale_max = np.max(counts),
                     parent=self.tags['plot_yaxis'],
                     label="Forecast Distribution",
                     format=''
                 )
-                # dpg.bind_colormap(heat_series, dpg.mvPlotColormap_Hot)
+                # dpg.bind_colormap(dpg.last_item(), dpg.mvPlotColormap_RdBu)
                 
+        series_context = dpg.add_line_series(list(t_context), context_data.tolist(), label='Context', parent=self.tags['plot_yaxis'])
+        series_truth = dpg.add_line_series(list(t_horizon), y_true.tolist(), label='Ground Truth', parent=self.tags['plot_yaxis'])
+        dpg.bind_item_theme(series_context, self.plot_themes['context'])
+        dpg.bind_item_theme(series_truth, self.plot_themes['ground_truth'])
 
         dpg.set_item_label(self.tags['plot'], f"Forecast for '{self.target_col}'")
         dpg.fit_axis_data(self.tags['plot_xaxis'])

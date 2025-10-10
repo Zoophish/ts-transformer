@@ -59,8 +59,7 @@ class Attention(nn.Module):
             self,
             dim : int,
             n_head : int,
-            dropout : float = 0.0,
-            dropout_modes : set = {'weights'},
+            weight_dropout : float = 0.0,
             imp : str ='torch'
         ):
         super().__init__()
@@ -69,8 +68,7 @@ class Attention(nn.Module):
             raise ValueError("dim must be divisible by n_head")
         self.n_head = n_head
         self.head_dim = dim // n_head
-        self.dropout_p = dropout
-        self.dropout_modes = dropout_modes
+        self.weight_dropout = weight_dropout
         self.force_dropout = False
         self.imp = imp
         
@@ -84,8 +82,8 @@ class Attention(nn.Module):
         self.kv_cache = None
 
     @property
-    def use_dropout(self):
-        return self.training or self.force_dropout
+    def _weight_dropout(self):
+        return self.weight_dropout if self.training or self.force_dropout else 0.0
 
     def scaled_dot_product_attention(self, q, k, v, mask, dropout_p = 0.0):
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
@@ -120,13 +118,12 @@ class Attention(nn.Module):
         if use_kv_cache:
             self.kv_cache = k, v
         # dot product attention
-        weights_dropout = self.dropout_p if self.use_dropout and 'weights' in self.dropout_modes else 0
         match self.imp:
             case 'internal':
-                output = self.scaled_dot_product_attention(q, k, v, mask, weights_dropout)
+                output = self.scaled_dot_product_attention(q, k, v, mask, self._weight_dropout)
             case 'torch':
                 mask = ~mask.unsqueeze(1) if not use_kv_cache else None
-                output = F.scaled_dot_product_attention(q, k, v, mask, weights_dropout)
+                output = F.scaled_dot_product_attention(q, k, v, mask, self._weight_dropout)
 
         # transpose back to original dims, ensure contiguity before creating view
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
@@ -174,18 +171,20 @@ class EncoderLayer(nn.Module):
             d_model : int,
             n_head : int,
             d_ff : int,
-            dropout : float,
+            dropout_attn : float,
+            dropout_residual : float,
         ):
         super().__init__()
         self.attention = Attention(
             d_model,
             n_head,
+            dropout_attn,
             imp='torch'
         )
         self.ffn = GatedLinearUnit(d_model, d_ff)
         self.layer_norm1 = nn.RMSNorm(d_model)
         self.layer_norm2 = nn.RMSNorm(d_model)
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout = nn.Dropout(p=dropout_residual)
 
     def reset_kv_cache(self):
         self.attention.kv_cache = None
@@ -210,14 +209,17 @@ class DecoderTransformer(nn.Module):
             d_model : int,
             n_head : int,
             d_ff : int,
-            dropout : float,
             n_layers : int,
+            dropout_attn : float,
+            dropout_residual : float,
+            dropout_embed : float,
         ):
         super().__init__()
         self.d_model = d_model
         self.input_projection = nn.Linear(in_dim, d_model)
+        self.embed_dropout = nn.Dropout(dropout_embed)
         self.decoder_blocks = nn.ModuleList([
-            EncoderLayer(d_model, n_head, d_ff, dropout)
+            EncoderLayer(d_model, n_head, d_ff, dropout_attn, dropout_residual)
             for _ in range(n_layers)
         ])
         self.fc = nn.Linear(d_model, out_dim)
@@ -249,7 +251,7 @@ class DecoderTransformer(nn.Module):
                 mask = mask.unsqueeze(1) | causal_mask
 
         # project the input (tokens) to the embedding dimension
-        x = self.input_projection(x)
+        x = self.embed_dropout(self.input_projection(x))
 
         # process each decoder block
         decoder_out = x

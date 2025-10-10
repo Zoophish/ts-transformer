@@ -17,7 +17,9 @@ class ProbablisticTransformerLightning(L.LightningModule):
         d_model: int,
         n_head: int,
         d_ff: int,
-        dropout: float,
+        dropout_embed: float,
+        dropout_attn: float,
+        dropout_residual: float,
         n_layers: int,
         learning_rate: float,
         l2_lambda: float,
@@ -33,7 +35,9 @@ class ProbablisticTransformerLightning(L.LightningModule):
             d_model=d_model,
             n_head=n_head,
             d_ff=d_ff,
-            dropout=dropout,
+            dropout_embed=dropout_embed,
+            dropout_attn=dropout_attn,
+            dropout_residual=dropout_residual,
             n_layers=n_layers,
             dist_cls=dist_cls
         )
@@ -52,12 +56,14 @@ class ProbablisticTransformerLightning(L.LightningModule):
         self,
         context: torch.Tensor,
         horizon_len: int,
-        pad_mask: torch.Tensor = None
+        pad_mask: torch.Tensor = None,
+        use_mcd: bool = False
     ):
         return self.model.generate(
             context,
             horizon_len,
-            pad_mask
+            pad_mask,
+            use_mcd
         )
     
     def compute_loss(self, batch):
