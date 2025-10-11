@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Distribution, Normal
 
-from .causal_in import CausalINLayer
+from .inst_norm import CausalINLayer
 from .transformer import DecoderTransformer
 from .distribution_head import DistributionHead
 
@@ -118,45 +118,70 @@ class ProbablisticTransformer(nn.Module):
         horizon_len: int,
         pad_mask: torch.Tensor = None,
         mc_samples : int = 32,
-        dropout_samples : int = 8,
+        crn_samples : int = 8,
         max_batch_size : int = 256,
         buffer_device = 'cpu'
     ):
         """
-        Uses common random numbers method for estimating aleatoric and epistemic uncertainty
-        separately using Monte Carlo rollouts and dropout masks.
-        """
-        mc_samples, ctx_len, n_feat = context.shape
-        y = torch.zeros((mc_samples * dropout_samples, horizon_len, n_feat), device=buffer_device)
+        Generates predictions and decomposes aleatoric and epistemic uncertainty using
+        Monte Carlo rollouts with MC Dropout and Common Random Numbers.
 
-        self.toggle_dropout(True)
-        self.reset_kv_cache()
-        
-        # calculate work sizes to fully utilise max_batch_size
-        total_work_size = mc_samples * dropout_samples
-        work_group_size = min(max_batch_size, total_work_size)
-        n_work_groups = total_work_size // work_group_size
-        remainder_group_size = total_work_size % work_group_size
+        By keeping the random numbers fixed for each of the mc_samples paths across all dropout_samples
+        worlds, the difference observed is almost entirely attributable to the change in the dropout mask,
+        not the randomness of the sampling path. This is the basis for estimating the epistemic uncertainty.
+        """
+        in_batch_size, ctx_len, n_feat = context.shape
+        if in_batch_size != 1:
+            raise ValueError("Batch dimension of context should be of size 1.")
+
+        # calculate work size
+        total_rollouts = mc_samples * crn_samples
 
         # deterministic samples in [0, 1] (Sobol has good MC properties)
-        sampler = torch.quasirandom.SobolEngine(dimension=mc_samples, scramble=True, seed=0)
-
         dimension = horizon_len * n_feat
-        sampler = torch.quasirandom.SobolEngine(dimension=dimension, scramble=True)
+        sampler = torch.quasirandom.SobolEngine(dimension, scramble=True)
+        # draw mc_samples from Sobol (common across each mc_samples chunk)
         uniform_samples = sampler.draw(mc_samples).to(context.device)
-        uniform_samples = uniform_samples.reshape(mc_samples, horizon_len, n_feat)
+        uniform_samples = uniform_samples.view(mc_samples, horizon_len, n_feat)
 
-        for i in range(n_work_groups):
-            X = self.causal_inst_norm(context, fit=True)
-            for t in range(horizon_len):
-                out = self.forward(X, pad_mask=pad_mask)
-                # draw sample from Sobol sequence
-                uniform_sample = sampler.draw()
-                # use inverse CDF method to sample distribution
-                sample = out['dist'].icdf(uniform_sample)[:, -1:, :]
-                y[:, t:, :] = self.causal_inst_norm.denormalise(sample[:, :, :])
-                X = sample
+        self.toggle_dropout(True)
+
+        y_buff = torch.zeros((total_rollouts, horizon_len, n_feat), device=buffer_device)
+        # fit instance norm layer once
+        norm_context = self.causal_inst_norm(context.clone(), fit=True)
+
+        # perform full autoregressive rollout per sub batch
+        for start_idx in range(0, total_rollouts, max_batch_size):
+            end_idx = min(start_idx + max_batch_size, total_rollouts)
+            current_batch_size = end_idx - start_idx
+
+            # prepare the sub batch
+            sub_batch_context = norm_context.expand(current_batch_size, -1, -1)
+            x_t = sub_batch_context
+
+            # perform rollout over sub batch
             self.reset_kv_cache()
-            sampler.reset()
+            for t in range(horizon_len):
+                out = self.forward(x_t)
+                # get samples for sub batch and step (wrap indexing to tile the 0th dim)
+                wrap_indices = torch.arange(start_idx, end_idx) % mc_samples
+                samples_t = uniform_samples[wrap_indices, t:t+1, :]
 
-        return y
+                # use inverse CDF method to sample distribution
+                norm_next_x_t = out['dist'].icdf(samples_t)[:, -1:, :]
+
+                # store result in output buffer
+                next_x_t = self.causal_inst_norm.denormalise(norm_next_x_t)
+                y_buff[start_idx:end_idx, t:t+1, :] = next_x_t.to(buffer_device)
+
+                # next step
+                x_t = norm_next_x_t
+
+        y_buff = y_buff.reshape(crn_samples, mc_samples, horizon_len, -1)
+        # determine variance across common Sobol samples
+        mc_means = y_buff.mean(dim=1)
+        epistemic_var = mc_means.var(dim=0)
+        y_buff = y_buff.reshape(crn_samples * mc_samples, horizon_len, -1)
+
+        self.toggle_dropout(False)
+        return y_buff, epistemic_var

@@ -66,6 +66,26 @@ class ProbablisticTransformerLightning(L.LightningModule):
             use_mcd
         )
     
+    def generate_mcd(
+        self,
+        context: torch.Tensor,
+        horizon_len: int,
+        pad_mask: torch.Tensor = None,
+        mc_samples : int = 32,
+        crn_samples : int = 8,
+        max_batch_size : int = 256,
+        buffer_device = 'cpu'
+    ):
+        return self.model.generate_mcd(
+            context=context,
+            horizon_len=horizon_len,
+            pad_mask=pad_mask,
+            mc_samples=mc_samples,
+            crn_samples=crn_samples,
+            max_batch_size=max_batch_size,
+            buffer_device=buffer_device
+        )
+    
     def compute_loss(self, batch):
         window_batch, pad_mask = batch
         # single step predictions

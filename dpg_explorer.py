@@ -39,6 +39,7 @@ class TimeSeriesExplorerDPG:
             'median':       (214, 40, 40, 255),
             'ci_50':        (214, 40, 40, 128),
             'ci_90':        (214, 40, 40, 77),
+            'epistemic':    (125, 125, 125, 255)
         }
     
     def _setup_plot_themes(self):
@@ -79,9 +80,13 @@ class TimeSeriesExplorerDPG:
             'plot': dpg.generate_uuid(),
             'plot_xaxis': dpg.generate_uuid(),
             'plot_yaxis': dpg.generate_uuid(),
+            'u_plot': dpg.generate_uuid(),
+            'u_plot_xaxis': dpg.generate_uuid(),
+            'u_plot_yaxis': dpg.generate_uuid(),
             'context_input': dpg.generate_uuid(),
             'horizon_input': dpg.generate_uuid(),
             'mc_samples_input': dpg.generate_uuid(),
+            'crn_samples_input': dpg.generate_uuid(),
             'start_pos_input': dpg.generate_uuid(),
             'use_mcd': dpg.generate_uuid(),
             'log_window': dpg.generate_uuid(),
@@ -94,11 +99,12 @@ class TimeSeriesExplorerDPG:
                 # plot and log
                 with dpg.group(width=-310):
                     # plot panel
-                    with dpg.child_window(label="PlotPanel", height=-150):
-                        with dpg.plot(label="Timeseries Plot", height=-1, width=-1, tag=self.tags['plot']):
+                    with dpg.child_window(label="Target Plot Panel", height=-180):
+                        with dpg.plot(label="Target Plot", height=-1, width=-1, tag=self.tags['plot']):
                             dpg.add_plot_legend()
                             self.tags['plot_xaxis'] = dpg.add_plot_axis(dpg.mvXAxis, label="Time Step")
                             self.tags['plot_yaxis'] = dpg.add_plot_axis(dpg.mvYAxis, label="Value")
+                            self.tags['u_plot_yaxis'] = dpg.add_plot_axis(dpg.mvYAxis, label="Epistemic")
                     
                     # log panel
                     with dpg.child_window(label="LogConsole", height=-1, tag=self.tags['log_window']):
@@ -119,6 +125,7 @@ class TimeSeriesExplorerDPG:
                         dpg.add_input_int(label="Context", default_value=256, tag=self.tags['context_input'])
                         dpg.add_input_int(label="Horizon", default_value=128, tag=self.tags['horizon_input'])
                         dpg.add_input_int(label="MC Samples", default_value=16, tag=self.tags['mc_samples_input'])
+                        dpg.add_input_int(label="CRN Samples", default_value=1, tag=self.tags['crn_samples_input'])
                         dpg.add_input_int(label="Start Position", default_value=0, tag=self.tags['start_pos_input'])
                         dpg.add_checkbox(label='Use MCD', default_value=False, tag=self.tags['use_mcd'])
 
@@ -145,9 +152,11 @@ class TimeSeriesExplorerDPG:
     def _clear_plot(self):
         """Clears all data series from the plot."""
         dpg.delete_item(self.tags['plot_yaxis'], children_only=True)
+        dpg.delete_item(self.tags['u_plot_yaxis'], children_only=True)
         dpg.set_item_label(self.tags['plot'], "Timeseries Plot")
         dpg.set_axis_limits_auto(self.tags['plot_xaxis'])
         dpg.set_axis_limits_auto(self.tags['plot_yaxis'])
+        dpg.set_axis_limits_auto(self.tags['u_plot_yaxis'])
 
     def _select_file_callback(self, sender, app_data):
         fpath = app_data['file_path_name']
@@ -199,6 +208,7 @@ class TimeSeriesExplorerDPG:
         horizon_len = dpg.get_value(self.tags['horizon_input'])
         start_pos = dpg.get_value(self.tags['start_pos_input'])
         mc_samples = dpg.get_value(self.tags['mc_samples_input'])
+        crn_samples = dpg.get_value(self.tags['crn_samples_input'])
             
         if start_pos < context_len or start_pos + horizon_len > len(self.ts_data):
             self._log("Invalid Range: The chosen start position, context, and horizon are out of bounds for the data.", level='error')
@@ -209,15 +219,24 @@ class TimeSeriesExplorerDPG:
 
         # model inference
         X_context = torch.tensor(self.ts_data[start_pos - context_len : start_pos], dtype=torch.float32, device=self.device)
-        X = X_context.repeat(mc_samples, 1).unsqueeze(-1)
+        # X = X_context.repeat(mc_samples, 1).unsqueeze(-1)
+        X = X_context.unsqueeze(0).unsqueeze(-1)
         y_true = self.ts_data[start_pos : start_pos + horizon_len]
 
         try:
-            y_pred = self.model.generate(
-                X,
-                horizon_len,
-                use_mcd=dpg.get_value(self.tags['use_mcd'])
-            ).cpu()
+            # y_pred = self.model.generate(
+            #     X,
+            #     horizon_len,
+            #     use_mcd=dpg.get_value(self.tags['use_mcd'])
+            # ).cpu()
+            y_pred, epistemic = self.model.generate_mcd(
+                context=X,
+                horizon_len=horizon_len,
+                mc_samples=mc_samples,
+                crn_samples=crn_samples,
+                max_batch_size=256,
+                buffer_device='cpu'
+            )
         except Exception as e:
             self._clear_plot()
             self._log(f"Model Inference Exception: {e}", level='error')
@@ -273,12 +292,15 @@ class TimeSeriesExplorerDPG:
                 
         series_context = dpg.add_line_series(list(t_context), context_data.tolist(), label='Context', parent=self.tags['plot_yaxis'])
         series_truth = dpg.add_line_series(list(t_horizon), y_true.tolist(), label='Ground Truth', parent=self.tags['plot_yaxis'])
+        series_epistemic = dpg.add_line_series(list(t_horizon), epistemic[:, 0].tolist(), label='Epistemic Var', parent=self.tags['u_plot_yaxis'])
         dpg.bind_item_theme(series_context, self.plot_themes['context'])
         dpg.bind_item_theme(series_truth, self.plot_themes['ground_truth'])
+        dpg.bind_item_theme(series_epistemic, self.plot_themes['epistemic'])
 
         dpg.set_item_label(self.tags['plot'], f"Forecast for '{self.target_col}'")
         dpg.fit_axis_data(self.tags['plot_xaxis'])
         dpg.fit_axis_data(self.tags['plot_yaxis'])
+        dpg.fit_axis_data(self.tags['u_plot_yaxis'])
         self._log("Plot updated successfully.", level='info')
 
     def run(self):
