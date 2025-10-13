@@ -77,20 +77,28 @@ class Attention(nn.Module):
         self.W_k = nn.Linear(dim, dim, bias=False)
         self.W_v = nn.Linear(dim, dim, bias=False)
         self.W_o = nn.Linear(dim, dim, bias=False)
+        
+        # weight dropout module for internal implementation only
+        self.weight_dropout_layer = nn.Dropout(weight_dropout)
 
         self.rope = RotaryPositionalEncoding(self.head_dim)
         self.kv_cache = None
 
     @property
     def _weight_dropout(self):
+        """
+        If the torch implementation of scaled dot product attn is used, can't use
+        a Dropout module, so this is a workaround.
+        """
         return self.weight_dropout if self.training or self.force_dropout else 0.0
 
+    # @torch.compile
     def scaled_dot_product_attention(self, q, k, v, mask, dropout_p = 0.0):
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
         if mask is not None:
             mask = mask.unsqueeze(1)  # extend the mask across attn head dim
             scores = scores.masked_fill(mask, float('-inf'))  # note, true -> -inf
-        attention_weights = F.dropout(F.softmax(scores, dim=-1), dropout_p)
+        attention_weights = self.weight_dropout_layer(F.softmax(scores, dim=-1))
         return torch.matmul(attention_weights, v)
 
     def forward(self, x : torch.Tensor, mask=None, use_kv_cache = False):
@@ -173,13 +181,14 @@ class EncoderLayer(nn.Module):
             d_ff : int,
             dropout_attn : float,
             dropout_residual : float,
+            attn_imp = 'torch'
         ):
         super().__init__()
         self.attention = Attention(
             d_model,
             n_head,
             dropout_attn,
-            imp='torch'
+            imp=attn_imp
         )
         self.ffn = GatedLinearUnit(d_model, d_ff)
         self.layer_norm1 = nn.RMSNorm(d_model)
@@ -213,13 +222,14 @@ class DecoderTransformer(nn.Module):
             dropout_attn : float,
             dropout_residual : float,
             dropout_embed : float,
+            attn_imp = 'torch'
         ):
         super().__init__()
         self.d_model = d_model
         self.input_projection = nn.Linear(in_dim, d_model)
         self.embed_dropout = nn.Dropout(dropout_embed)
         self.decoder_blocks = nn.ModuleList([
-            EncoderLayer(d_model, n_head, d_ff, dropout_attn, dropout_residual)
+            EncoderLayer(d_model, n_head, d_ff, dropout_attn, dropout_residual, attn_imp)
             for _ in range(n_layers)
         ])
         self.fc = nn.Linear(d_model, out_dim)

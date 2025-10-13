@@ -6,6 +6,7 @@ from torch.distributions import Distribution, Normal
 from .inst_norm import CausalINLayer
 from .transformer import DecoderTransformer
 from .distribution_head import DistributionHead
+from .concrete_dropout import ConcreteDropout
 
 
 class ProbablisticTransformer(nn.Module):
@@ -24,13 +25,15 @@ class ProbablisticTransformer(nn.Module):
         dropout_embed: float,
         dropout_attn: float,
         dropout_residual: float,
-        dist_cls: Type[Distribution] = Normal
+        dist_cls: Type[Distribution] = Normal,
+        use_conc_dropout: bool = False
     ):
         super().__init__()
 
         self.causal_inst_norm = CausalINLayer(
             n_feat=in_dim
         )
+        attn_imp = 'internal' if use_conc_dropout else 'torch'
         self.model = DecoderTransformer(
             in_dim=in_dim,
             out_dim=d_ff,
@@ -41,12 +44,16 @@ class ProbablisticTransformer(nn.Module):
             dropout_embed=dropout_embed,
             dropout_attn=dropout_attn,
             dropout_residual=dropout_residual,
+            attn_imp=attn_imp
         )
         self.dist_head = DistributionHead(
             in_dim=d_ff,
             out_dim=out_dim,
             distr_cls=dist_cls
         )
+        if use_conc_dropout:
+            self.conc_dropout_modules = []
+            self._replace_dropout_with_concrete(self)
 
     def reset_kv_cache(self):
         self.model.reset_kv_cache()
@@ -59,7 +66,18 @@ class ProbablisticTransformer(nn.Module):
         getattr(self.model.embed_dropout, func_attr)()
         for decoder_block in self.model.decoder_blocks:
             decoder_block.attention.force_dropout = state
+            getattr(decoder_block.attention.weight_dropout_layer, func_attr)()
             getattr(decoder_block.dropout, func_attr)()
+
+    def _replace_dropout_with_concrete(self, module : nn.Module):
+        for name, child in module.named_children():
+            if isinstance(child, nn.Dropout):
+                new_module = ConcreteDropout()#1e-4, 1e-3)
+                setattr(module, name, new_module)
+                self.conc_dropout_modules.append(new_module)
+            else:
+                self._replace_dropout_with_concrete(child)
+        return module
 
     def forward(
             self,
@@ -84,8 +102,8 @@ class ProbablisticTransformer(nn.Module):
         if targets is not None:
             targets = self.causal_inst_norm(targets, fit=False)
         # get distribution, and NLL loss if targets is set
-        outputs = self.dist_head(hidden_states, targets)
-        return outputs
+        output_dict = self.dist_head(hidden_states, targets)
+        return output_dict
     
     @torch.no_grad
     def generate(
@@ -123,7 +141,7 @@ class ProbablisticTransformer(nn.Module):
         buffer_device = 'cpu'
     ):
         """
-        Generates predictions and decomposes aleatoric and epistemic uncertainty using
+        Generates predictions with decomposed aleatoric and epistemic uncertainty using
         Monte Carlo rollouts with MC Dropout and Common Random Numbers.
 
         By keeping the random numbers fixed for each of the mc_samples paths across all dropout_samples
@@ -181,7 +199,14 @@ class ProbablisticTransformer(nn.Module):
         # determine variance across common Sobol samples
         mc_means = y_buff.mean(dim=1)
         epistemic_var = mc_means.var(dim=0)
+
+        # var_per_model = y_buff.var(dim=0)
+        # aleatoric_var = var_per_model.mean(dim=0)
+
         y_buff = y_buff.reshape(crn_samples * mc_samples, horizon_len, -1)
 
+        total_var = y_buff.var(dim=0)
+        epistemic_ratio = epistemic_var / total_var
+
         self.toggle_dropout(False)
-        return y_buff, epistemic_var
+        return y_buff, epistemic_ratio
