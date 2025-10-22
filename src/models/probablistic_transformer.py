@@ -26,7 +26,9 @@ class ProbablisticTransformer(nn.Module):
         dropout_attn: float,
         dropout_residual: float,
         dist_cls: Type[Distribution] = Normal,
-        use_conc_dropout: bool = False
+        use_conc_dropout: bool = False,
+        weight_reg: float = 1e-6,
+        dropout_reg:float = 1e-4
     ):
         super().__init__()
 
@@ -51,17 +53,15 @@ class ProbablisticTransformer(nn.Module):
             out_dim=out_dim,
             distr_cls=dist_cls
         )
+
         if use_conc_dropout:
             self.conc_dropout_modules = []
-            self._replace_dropout_with_concrete(self)
+            self._replace_dropout_with_concrete(self, weight_reg, dropout_reg)
 
     def reset_kv_cache(self):
         self.model.reset_kv_cache()
 
     def toggle_dropout(self, state=False):
-        """
-        Reactivates dropout for inference. Must be called after calls to eval().
-        """
         func_attr = 'train' if state else 'eval'
         getattr(self.model.embed_dropout, func_attr)()
         for decoder_block in self.model.decoder_blocks:
@@ -69,14 +69,19 @@ class ProbablisticTransformer(nn.Module):
             getattr(decoder_block.attention.weight_dropout_layer, func_attr)()
             getattr(decoder_block.dropout, func_attr)()
 
-    def _replace_dropout_with_concrete(self, module : nn.Module):
+    def _replace_dropout_with_concrete(
+            self,
+            module : nn.Module,
+            weight_reg : float,
+            dropout_reg : float
+        ):
         for name, child in module.named_children():
             if isinstance(child, nn.Dropout):
-                new_module = ConcreteDropout()#1e-4, 1e-3)
+                new_module = ConcreteDropout(weight_reg, dropout_reg)
                 setattr(module, name, new_module)
                 self.conc_dropout_modules.append(new_module)
             else:
-                self._replace_dropout_with_concrete(child)
+                self._replace_dropout_with_concrete(child, weight_reg, dropout_reg)
         return module
 
     def forward(
@@ -200,13 +205,13 @@ class ProbablisticTransformer(nn.Module):
         mc_means = y_buff.mean(dim=1)
         epistemic_var = mc_means.var(dim=0)
 
-        # var_per_model = y_buff.var(dim=0)
-        # aleatoric_var = var_per_model.mean(dim=0)
+        var_per_model = y_buff.var(dim=0)
+        aleatoric_var = var_per_model.mean(dim=0)
 
         y_buff = y_buff.reshape(crn_samples * mc_samples, horizon_len, -1)
 
-        total_var = y_buff.var(dim=0)
-        epistemic_ratio = epistemic_var / total_var
+        # total_var = y_buff.var(dim=0)
+        # epistemic_ratio = epistemic_var / total_var
 
         self.toggle_dropout(False)
-        return y_buff, epistemic_ratio
+        return y_buff, epistemic_var, aleatoric_var

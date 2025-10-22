@@ -1,5 +1,6 @@
 checkpoints
 lightning_logs
+notes
 __pycache__
 *.parquet
 *.csv

@@ -52,8 +52,7 @@ class Attention(nn.Module):
     """
     Multihead attention mechanism (with RoPE).
     
-    The Torch scaled dot product attention used by default, but an internal method
-    is available for educational purposes.
+    The faster torch implementation of scaled dot product attention is available.
     """
     def __init__(
             self,

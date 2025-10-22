@@ -19,14 +19,17 @@ class ProbablisticTransformerLightning(L.LightningModule):
         d_model: int,
         n_head: int,
         d_ff: int,
-        dropout_embed: float,
-        dropout_attn: float,
-        dropout_residual: float,
         n_layers: int,
         learning_rate: float,
         l2_lambda: float,
         dist_cls: Type[Distribution] = Normal,
-        use_conc_dropout: bool = False
+        dropout_embed: float = 0.0,
+        dropout_attn: float = 0.0,
+        dropout_residual: float = 0.0,
+        # concrete dropout params
+        use_conc_dropout: bool = False,
+        weight_reg: float = 1e-6,
+        dropout_reg: float = 1e-4
     ):
         super().__init__()
 
@@ -43,7 +46,9 @@ class ProbablisticTransformerLightning(L.LightningModule):
             dropout_residual=dropout_residual,
             n_layers=n_layers,
             dist_cls=dist_cls,
-            use_conc_dropout=use_conc_dropout
+            use_conc_dropout=use_conc_dropout,
+            weight_reg=weight_reg,
+            dropout_reg=dropout_reg
         )
 
     def reset_kv_cache(self):
@@ -125,13 +130,13 @@ class ProbablisticTransformerLightning(L.LightningModule):
         return optimiser
 
     def uncertainty_calibration(model, test_loader):
-        all_epistemic_ratios = torch.zeros(len(test_loader))
+        all_epistemic_vars = torch.zeros(len(test_loader))
         all_prediction_errors = torch.zeros(len(test_loader))
         model = model.to('cuda')
 
         for i, (context, y_true) in enumerate(test_loader):
             context, y_true = context.to('cuda'), y_true.to('cuda')
-            y_buff, epistemic_ratio = model.generate_mcd(
+            y_buff, epistemic_var, _ = model.generate_mcd(
                 context,
                 horizon_len=1,
                 mc_samples=8,
@@ -140,22 +145,22 @@ class ProbablisticTransformerLightning(L.LightningModule):
             
             pred_mean = y_buff.mean(dim=0)
 
-            avg_epistemic_ratio = epistemic_ratio.mean().cpu().item()
-            all_epistemic_ratios[i] = avg_epistemic_ratio
+            avg_epistemic_var = epistemic_var.mean().cpu().item()
+            all_epistemic_vars[i] = avg_epistemic_var
 
             error = torch.mean(torch.abs(pred_mean.cpu() - y_true.cpu()))
             all_prediction_errors[i] = error.item()
             print(f"{i} / {len(test_loader)}")
 
-        correlation, p_value = spearmanr(all_epistemic_ratios, all_prediction_errors)
+        correlation, p_value = spearmanr(all_epistemic_vars, all_prediction_errors)
         
         print(f"Spearman Rank Correlation between Epistemic Signal and MAE:")
         print(f"Rho: {correlation:.4f}")
         print(f"P-value: {p_value:.4f}")
 
         print(f"Epistemic Signal Statistics:")
-        print(f"Mean {all_epistemic_ratios.mean().item()}")
-        print(f"Min {all_epistemic_ratios.min().item()}")
-        print(f"Max {all_epistemic_ratios.min().item()}")
+        print(f"Mean {all_epistemic_vars.mean().item()}")
+        print(f"Min {all_epistemic_vars.min().item()}")
+        print(f"Max {all_epistemic_vars.max().item()}")
         
         return correlation
