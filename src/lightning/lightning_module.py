@@ -29,7 +29,11 @@ class ProbablisticTransformerLightning(L.LightningModule):
         # concrete dropout params
         use_conc_dropout: bool = False,
         weight_reg: float = 1e-6,
-        dropout_reg: float = 1e-4
+        dropout_reg: float = 1e-4,
+        # variational Bayes by backprop
+        use_var_bayes: bool = False,
+        kl_beta: float = 1e-4,
+        use_stateful_dropout: bool = True
     ):
         super().__init__()
 
@@ -48,7 +52,9 @@ class ProbablisticTransformerLightning(L.LightningModule):
             dist_cls=dist_cls,
             use_conc_dropout=use_conc_dropout,
             weight_reg=weight_reg,
-            dropout_reg=dropout_reg
+            dropout_reg=dropout_reg,
+            use_var_bayes=use_var_bayes,
+            use_stateful_dropout=use_stateful_dropout
         )
 
     def reset_kv_cache(self):
@@ -90,7 +96,7 @@ class ProbablisticTransformerLightning(L.LightningModule):
             horizon_len=horizon_len,
             pad_mask=pad_mask,
             mc_samples=mc_samples,
-            crn_samples=crn_samples,
+            model_state_samples=crn_samples,
             max_batch_size=max_batch_size,
             buffer_device=buffer_device
         )
@@ -101,13 +107,20 @@ class ProbablisticTransformerLightning(L.LightningModule):
         X_batch = window_batch[:, :-1, ...]
         y_batch = window_batch[:, 1:, ...]
         pad_mask = pad_mask[:, :-1]
-        # feed the model targets so it generates the NLL loss 
+        # feed the model targets so it generates the NLL loss
         loss = self.model(X_batch, pad_mask, targets=y_batch)['loss']
 
         # add concrete dropout regularisation if enabled
         if hasattr(self.model, 'conc_dropout_modules'):
             for conc_dropout in self.model.conc_dropout_modules:
                 loss += conc_dropout.regularisation()
+
+        # add kl cost term if bayes is enabled
+        if hasattr(self.model, 'bayes_units'):
+            # NOTE: can technically batch this
+            beta = self.hparams['kl_beta']
+            for bayes_unit in self.model.bayes_units:
+                loss += beta * bayes_unit.kl_cost()
 
         return loss
     

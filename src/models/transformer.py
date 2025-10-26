@@ -83,16 +83,8 @@ class Attention(nn.Module):
         self.rope = RotaryPositionalEncoding(self.head_dim)
         self.kv_cache = None
 
-    @property
-    def _weight_dropout(self):
-        """
-        If the torch implementation of scaled dot product attn is used, can't use
-        a Dropout module, so this is a workaround.
-        """
-        return self.weight_dropout if self.training or self.force_dropout else 0.0
-
     # @torch.compile
-    def scaled_dot_product_attention(self, q, k, v, mask, dropout_p = 0.0):
+    def scaled_dot_product_attention(self, q, k, v, mask):
         scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim**0.5)
         if mask is not None:
             mask = mask.unsqueeze(1)  # extend the mask across attn head dim
@@ -127,10 +119,11 @@ class Attention(nn.Module):
         # dot product attention
         match self.imp:
             case 'internal':
-                output = self.scaled_dot_product_attention(q, k, v, mask, self._weight_dropout)
+                output = self.scaled_dot_product_attention(q, k, v, mask)
             case 'torch':
                 mask = ~mask.unsqueeze(1) if not use_kv_cache else None
-                output = F.scaled_dot_product_attention(q, k, v, mask, self._weight_dropout)
+                w_dropout = self.weight_dropout if self.training or self.force_dropout else 0.0
+                output = F.scaled_dot_product_attention(q, k, v, mask, w_dropout)
 
         # transpose back to original dims, ensure contiguity before creating view
         output = output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)

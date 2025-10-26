@@ -3,6 +3,7 @@
 ## Highlights
 - Based on the causal decoder transformer architecture
 - Probablistic predictions which can utilise arbitrary torch.distributions classes
+- "Drop-in" variational Baysian methods for epistemic uncertainty estimation
 - Pure PyTorch and Lightning modules available
 - Basic time series dataset utilities
 - Modular enough that architectural features can be hyperparameters
@@ -24,15 +25,20 @@ To try and address input scaling, each input sequence is standardised via an ins
 Dropout is applied to the residual sum after the attention unit, residual sum after the FFN, and to the embedding layer. Each dropout probability can be tuned manually or be entirely substituted with [Concrete Dropout](https://arxiv.org/abs/1705.07832). Concrete dropout attempts to optimise the dropout probabilties via backprop, but requires careful tuning of the regularisation parameters. If concrete dropout is enabled, the model resorts to using a slower custom scaled dot product attention implementation.
 
 ### Uncertainty
-Predictions can be generated using an uncertainty decomposition method. [Monte Carlo Dropout](https://arxiv.org/abs/1506.02142) is employed due to its simplicity, but it must be noted that this is a pragmatic approximation rather than a true epistemological measurement. The separate aleatoric and epistemic components of uncertainty are estimated using a common (quasi)-random numbers method; i.e. the same points in the state space are sampled multiple times with different dropout masks, meaning the variation in the results are attributable to dropout.
+Predictions can be generated using an variational bayes and uncertainty decomposition method. The options available for variational bayes are [Monte Carlo Dropout](https://arxiv.org/abs/1506.02142) and [Bayes by Backprop](https://arxiv.org/abs/1505.05424).
 
-Producing accurate epistemic uncertinaty estimates is difficult and requires careful calibration and validation. Ways of assessing the quality of the epistemic
+Monte Carlo Dropout is a pragmatic approximation rather than a true bayesian method. There is effectively no performance penalty, since it uses existing dropout layers. Either standard dropout or concrete dropout can be used for this method.
+
+Bayes by Backprop imposes actual distributions over the learnable parameters, which is a better variational bayes approximation. It uses more memory and is slower as it produces twice the number of parameters.
+
+Aleatoric uncertainty is estimated by sampling the horizon space many times like a Monte Carlo simulation. The epistemic component of uncertainty is estimated by sampling across different model states; in other words, samples from the effective variational posterior of the model. The epistemic uncertainty can then be estimated as the variance in the outputs across different model states. Common Sobol' sequences are used to improve the estimate variance.
 
 
 ## To do:
-- MC epistemic regulariser
+- MC epistemic regulariser (M>1)
 - Variational dropout
-- Make the concrete transformer its own class?
+- Better param initialisation
+- Stateful QRN and PRN generators with batching
 - Scheduled sampling
 - Adaptive minibatch selection
 - Smarter tokenisation

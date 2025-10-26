@@ -7,7 +7,8 @@ import math
 class ConcreteDropout(nn.Module):
     """
     Concrete Dropout layer based on https://arxiv.org/abs/1705.07832.
-    Can be used as a drop-in replacement for nn.Dropout.
+
+    Can be used as a drop-in replacement for nn.Dropout or StatefulDropout.
 
     Original paper adds a regularisation term to the loss to balance
     generalisation.
@@ -33,17 +34,19 @@ class ConcreteDropout(nn.Module):
         self.temp = 0.1
         self.eps = eps
 
+        self.generator = None
+
     @property
     def p(self):
         return torch.sigmoid(self.p_logit).detach().item()
 
-    def forward(self, x):
+    def forward(self, x : torch.Tensor):
         if not self.training:
             return x
         
         p = torch.sigmoid(self.p_logit)
 
-        unif_noise = torch.rand_like(x)
+        unif_noise = torch.empty_like(x).uniform_(generator=self.generator)
         
         drop_prob = (
             torch.log(p + self.eps)
