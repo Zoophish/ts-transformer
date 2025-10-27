@@ -185,13 +185,14 @@ class ProbablisticTransformer(nn.Module):
     
 
     @torch.no_grad
-    def generate_mcd(
+    def generate_bayes(
         self,
         context: torch.Tensor,
         horizon_len: int,
         pad_mask: torch.Tensor = None,
         mc_samples : int = 32,
         model_state_samples : int = 8,
+        scramble_seed : int = 0,
         max_batch_size : int = 256,
         buffer_device = 'cpu'
     ):
@@ -212,7 +213,7 @@ class ProbablisticTransformer(nn.Module):
 
         # deterministic samples in [0, 1] (Sobol has good MC properties)
         dimension = horizon_len * n_feat
-        sampler = torch.quasirandom.SobolEngine(dimension, scramble=True)
+        sampler = torch.quasirandom.SobolEngine(dimension, scramble=True, seed=scramble_seed)
         # draw mc_samples from Sobol (common across each mc_samples chunk)
         uniform_samples = sampler.draw(mc_samples).to(context.device)
         uniform_samples = uniform_samples.view(mc_samples, horizon_len, n_feat)
@@ -263,29 +264,6 @@ class ProbablisticTransformer(nn.Module):
             generator_seed += 1
 
         y_buff = y_buff.reshape(model_state_samples, mc_samples, horizon_len, -1)
-        # determine variance across common Sobol samples
-        mc_means = y_buff.mean(dim=1)
-        epistemic_var = mc_means.var(dim=0)
-
-        var_per_model = y_buff.var(dim=0)
-        # since each monte carlo rollout uses the *same samples*, but different state,
-        # the 'average' aleatoric prediction is the average over each state
-        mean_aleatoric_rollout = y_buff.mean(dim=0)
-        # we now have the 'average' mc_samples output, so we get quantiles from this
-        # notice that this is the same as the mean of both dim 0 and 1
-        aleatoric_mean = mean_aleatoric_rollout.mean(dim=0)
-        aleatoric_var = mean_aleatoric_rollout.var(dim=0)
-
-        # total var = aleatoric var + epsitemic
-        # we want to plot total quantiles (tangled aleatoric and epistemic)
-        # what we want to show is that for each timestep quantile, how much of that region
-        # is uncertain due to epistemic vs aleatoric
-
-
-        # y_buff = y_buff.reshape(model_state_samples * mc_samples, horizon_len, -1)
-
-        # total_var = y_buff.var(dim=0)
-        # epistemic_ratio = epistemic_var / total_var
 
         self.toggle_dropout(False)
-        return y_buff #, epistemic_var, aleatoric_var
+        return y_buff

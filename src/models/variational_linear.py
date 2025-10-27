@@ -38,11 +38,11 @@ class VariationalLinear(nn.Module):
         # the prior is the 'belief'/ideal distribution for weights
         # most priors encourage smaller posterior centers and prevent the 'width' collapsing
         # a normal distribution prior results in L2 regularisation
-        self.prior = D.Normal(0, 0.1)
+        self.w_prior = D.Normal(0, 1)
+        self.b_prior = D.Normal(0, 1) if self.bias else None
         
         # the variational posterior distribution type is the same for the weights and biases
-        # fix it as diagonal gaussian
-        # (diagonal meaning independent)
+        # fix it as diagonal gaussian (diagonal meaning independent)
         # this is because the local reparam trick only works for gaussian for now
         self._posterior_dist = D.Normal
         
@@ -61,24 +61,18 @@ class VariationalLinear(nn.Module):
 
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.w_mu, a=5**0.5)
-        nn.init.constant_(self.w_rho, -3)
+        nn.init.constant_(self.w_rho, -7)  # NOTE: I have found that these are extremely important parameters for overall performance
         if self.bias:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.w_mu)
             bound = fan_in**-0.5 if fan_in > 0 else 0
             nn.init.uniform_(self.b_mu, -bound, bound)
-            nn.init.constant_(self.b_rho, -3)
+            nn.init.constant_(self.b_rho, -5)  # NOTE: here too
 
-    def forward(
-            self,
-            x : torch.Tensor,
-            force_global : bool = False
-        ):
-        # allow to force global as this is a useful way to get same weights per batch
-        use_global_reparam = self.use_global_reparam or force_global
+    def forward(self, x : torch.Tensor):
         if self.freeze:
             return F.linear(x, self.w_mu, self.b_mu)
         else:
-            if use_global_reparam:
+            if self.use_global_reparam:
                 # NOTE: use Sobol samples to get better MC properties
                 # ensure positivity in the rho parameters
                 w_sigma = F.softplus(self.w_rho)
@@ -100,26 +94,39 @@ class VariationalLinear(nn.Module):
                 return F.linear(x, w_sampled, b_sampled)
             else:
                 # the 'local' reparam trick effectively results in the noise applied per batch item
-                # this is done simply by applying the noise after the linear transform rather than before
+                # this is done simply by applying the noise after the linear transform
+                # if you tried to generate unique weights/biases before the transformation, you'd need
+                # a prohibitive amount of memory
+                
+                # mean of the affine transformation (standard deterministic path)
+                affine_mu = F.linear(x, self.w_mu, self.b_mu)
+                # variance of the affine transformation
                 w_sigma = F.softplus(self.w_rho)
-                affine_mu = F.linear(x, self.w_mu) if self.bias else 0
-                # obtain this using variance scaling rule
-                affine_var = F.linear(x*x, w_sigma*w_sigma)
-                affine_std = torch.sqrt(affine_var + self.eps)
+                # variance of weights (scaling rule): Var(W*x) = x^2 * Var(W)
+                w_var = F.linear(x*x, w_sigma*w_sigma)
 
-                # sample gaussian noise for the entire batch
+                if self.bias:
+                    b_sigma = F.softplus(self.b_rho)
+                    # variance from bias is independent of input x
+                    b_var = b_sigma*b_sigma
+                    # total var is sum of variances from weights and bias
+                    affine_var = w_var + b_var
+                else:
+                    affine_var = w_var
+
+                affine_std = torch.sqrt(affine_var + self.eps)
+                # sample gaussian noise for the *entire batch* rather than per weight/bias
                 epsilon = torch.empty_like(affine_std).normal_(generator=self.generator)
                 return affine_mu + affine_std * epsilon
 
-    
     def kl_cost(self):
-        # instantiate the distributions again (a bit inefficient - cache?)
+        # instantiate the distributions again
         w_sigma = F.softplus(self.w_rho)
         b_sigma = F.softplus(self.b_rho) if self.bias else None
         w_q = self._posterior_dist(loc=self.w_mu, scale=w_sigma)
         b_q = self._posterior_dist(loc=self.b_mu, scale=b_sigma) if self.bias else None
 
         # KL divergence 'cost'
-        w_kl = torch.sum(D.kl_divergence(w_q, self.prior))
-        b_kl = torch.sum(D.kl_divergence(b_q, self.prior)) if self.bias else 0
+        w_kl = torch.sum(D.kl_divergence(w_q, self.w_prior))
+        b_kl = torch.sum(D.kl_divergence(b_q, self.b_prior)) if self.bias else 0
         return w_kl + b_kl

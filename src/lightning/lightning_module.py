@@ -38,6 +38,7 @@ class ProbablisticTransformerLightning(L.LightningModule):
         super().__init__()
 
         self.save_hyperparameters()
+        self.kl_beta = kl_beta
 
         self.model = ProbablisticTransformer(
             in_dim=in_dim,
@@ -81,22 +82,24 @@ class ProbablisticTransformerLightning(L.LightningModule):
             use_mcd
         )
     
-    def generate_mcd(
+    def generate_bayes(
         self,
         context: torch.Tensor,
         horizon_len: int,
         pad_mask: torch.Tensor = None,
         mc_samples : int = 32,
-        crn_samples : int = 8,
+        model_state_samples : int = 8,
+        scramble_seed : int = 0,
         max_batch_size : int = 256,
         buffer_device = 'cpu'
     ):
-        return self.model.generate_mcd(
+        return self.model.generate_bayes(
             context=context,
             horizon_len=horizon_len,
             pad_mask=pad_mask,
             mc_samples=mc_samples,
-            model_state_samples=crn_samples,
+            model_state_samples=model_state_samples,
+            scramble_seed=scramble_seed,
             max_batch_size=max_batch_size,
             buffer_device=buffer_device
         )
@@ -118,15 +121,15 @@ class ProbablisticTransformerLightning(L.LightningModule):
         # add kl cost term if bayes is enabled
         if hasattr(self.model, 'bayes_units'):
             # NOTE: can technically batch this
-            beta = self.hparams['kl_beta']
             for bayes_unit in self.model.bayes_units:
-                loss += beta * bayes_unit.kl_cost()
+                loss += self.kl_beta * bayes_unit.kl_cost()
 
         return loss
     
     def training_step(self, batch, batch_idx):
         loss = self.compute_loss(batch)
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
+        self.log("kl_beta", self.kl_beta, on_step=True, on_epoch=True, logger=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
@@ -153,7 +156,7 @@ class ProbablisticTransformerLightning(L.LightningModule):
                 context,
                 horizon_len=1,
                 mc_samples=8,
-                crn_samples=8
+                model_state_samples=8
             )
             
             pred_mean = y_buff.mean(dim=0)

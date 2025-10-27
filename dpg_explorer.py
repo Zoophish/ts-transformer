@@ -6,6 +6,7 @@ import torch
 import torch.distributions.constraints as constraints
 import dearpygui.dearpygui as dpg
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 
 base_path = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +29,7 @@ class TimeSeriesExplorerDPG:
         self.df = None
         self.ts_data = None
         self.target_col = None
+        self.horizon_data = None
 
         self.tags = {}
         self.plot_themes = {}
@@ -41,7 +43,7 @@ class TimeSeriesExplorerDPG:
             'ci_90':        (214, 40, 40, 77),
             'epistemic':    (125, 125, 125, 255)
         }
-    
+
     def _setup_plot_themes(self):
         """Creates DPG themes for each plot style and stores them."""
         for name, color in self.plot_colors.items():
@@ -53,9 +55,14 @@ class TimeSeriesExplorerDPG:
                     dpg.add_theme_color(dpg.mvPlotCol_Fill, color, category=dpg.mvThemeCat_Plots)
             self.plot_themes[name] = theme
 
-        # with dpg.colormap_registry():
-        #     colors = [[255, 0, 0, 0], [255, 0, 0, 127], [255, 0, 0, 255]]
-        #     dpg.add_colormap(colors, qualitative=False, tag="transparent_red")
+    def _generate_gradient(self, prefix: str, c1, c2, steps: int = 10):
+        """Interpolates between two RGBA colours and returns a dict of labelled 8-bit RGBA tuples."""
+        c1, c2 = np.asarray(c1, dtype=float), np.asarray(c2, dtype=float)
+        alphas = np.linspace(0, 1, steps)
+        colours = ((1 - alphas)[:, None] * c1 + alphas[:, None] * c2)
+        colours = np.clip(np.rint(colours * 255), 0, 255)
+        # add to plot colours
+        self.plot_colors = self.plot_colors | {f"{prefix}_{i}": tuple(colour) for i, colour in enumerate(colours)}
 
     def _log(self, message: str, level: str = 'info'):
         """Adds a color-coded message to the log console."""
@@ -86,9 +93,10 @@ class TimeSeriesExplorerDPG:
             'context_input': dpg.generate_uuid(),
             'horizon_input': dpg.generate_uuid(),
             'mc_samples_input': dpg.generate_uuid(),
-            'crn_samples_input': dpg.generate_uuid(),
+            'bayes_samples_input': dpg.generate_uuid(),
+            'scramble_seed_input': dpg.generate_uuid(),
             'start_pos_input': dpg.generate_uuid(),
-            'use_mcd': dpg.generate_uuid(),
+            'num_bins_input': dpg.generate_uuid(),
             'log_window': dpg.generate_uuid(),
             'log_group': dpg.generate_uuid(),
             'view_mode_combo': dpg.generate_uuid(),
@@ -104,7 +112,6 @@ class TimeSeriesExplorerDPG:
                             dpg.add_plot_legend()
                             self.tags['plot_xaxis'] = dpg.add_plot_axis(dpg.mvXAxis, label="Time Step")
                             self.tags['plot_yaxis'] = dpg.add_plot_axis(dpg.mvYAxis, label="Value")
-                            self.tags['u_plot_yaxis'] = dpg.add_plot_axis(dpg.mvYAxis, label="Epistemic")
                     
                     # log panel
                     with dpg.child_window(label="LogConsole", height=-1, tag=self.tags['log_window']):
@@ -123,23 +130,24 @@ class TimeSeriesExplorerDPG:
                     
                     with dpg.collapsing_header(label="Inference Parameters", default_open=True):
                         dpg.add_input_int(label="Context", default_value=256, tag=self.tags['context_input'])
-                        dpg.add_input_int(label="Horizon", default_value=128, tag=self.tags['horizon_input'])
-                        dpg.add_input_int(label="MC Samples", default_value=16, tag=self.tags['mc_samples_input'])
-                        dpg.add_input_int(label="CRN Samples", default_value=1, tag=self.tags['crn_samples_input'])
+                        dpg.add_input_int(label="Horizon", default_value=32, tag=self.tags['horizon_input'])
+                        dpg.add_input_int(label="MC Samples", default_value=64, tag=self.tags['mc_samples_input'])
+                        dpg.add_input_int(label="Bayes Samples", default_value=1, tag=self.tags['bayes_samples_input'])
+                        dpg.add_input_int(label="Scramble Seed", default_value=1, tag=self.tags['scramble_seed_input'])
                         dpg.add_input_int(label="Start Position", default_value=0, tag=self.tags['start_pos_input'])
-                        dpg.add_checkbox(label='Use MCD', default_value=False, tag=self.tags['use_mcd'])
+                        dpg.add_input_int(label="Num Bins", default_value=16, tag=self.tags['num_bins_input'], callback=self._update_plot)
 
                     with dpg.collapsing_header(label="View Options", default_open=True):
                         dpg.add_combo(
                             label="Forecast View",
-                            items=['Quantiles', 'Spaghetti', 'Box Count'],
+                            items=['Quantiles', 'Spaghetti', 'Box Count', 'Box Count Decomposition'],
                             default_value='Quantiles',
                             tag=self.tags['view_mode_combo'],
-                            callback=self._update_plot()
+                            callback=self._update_plot
                         )
 
                     dpg.add_spacer(height=10)
-                    dpg.add_button(label="Recalculate & Plot", width=-1, height=40, callback=self._update_plot)
+                    dpg.add_button(label="Recalculate & Plot", width=-1, height=40, callback=self._run_model)
         
         # file dialogue
         with dpg.file_dialog(
@@ -152,11 +160,9 @@ class TimeSeriesExplorerDPG:
     def _clear_plot(self):
         """Clears all data series from the plot."""
         dpg.delete_item(self.tags['plot_yaxis'], children_only=True)
-        dpg.delete_item(self.tags['u_plot_yaxis'], children_only=True)
         dpg.set_item_label(self.tags['plot'], "Timeseries Plot")
         dpg.set_axis_limits_auto(self.tags['plot_xaxis'])
         dpg.set_axis_limits_auto(self.tags['plot_yaxis'])
-        dpg.set_axis_limits_auto(self.tags['u_plot_yaxis'])
 
     def _select_file_callback(self, sender, app_data):
         fpath = app_data['file_path_name']
@@ -199,7 +205,7 @@ class TimeSeriesExplorerDPG:
             self.ts_data = self.df[self.target_col].to_numpy(dtype=np.float32)
             self._log(f"Target column set to: {self.target_col}")
 
-    def _update_plot(self):
+    def _run_model(self):
         if self.ts_data is None:
             self._log("Please select a file and a target column first.", level='warning')
             return
@@ -208,20 +214,19 @@ class TimeSeriesExplorerDPG:
         horizon_len = dpg.get_value(self.tags['horizon_input'])
         start_pos = dpg.get_value(self.tags['start_pos_input'])
         mc_samples = dpg.get_value(self.tags['mc_samples_input'])
-        crn_samples = dpg.get_value(self.tags['crn_samples_input'])
+        bayes_samples = dpg.get_value(self.tags['bayes_samples_input'])
+        scramble_seed = dpg.get_value(self.tags['scramble_seed_input'])
             
         if start_pos < context_len or start_pos + horizon_len > len(self.ts_data):
             self._log("Invalid Range: The chosen start position, context, and horizon are out of bounds for the data.", level='error')
             return
 
-        self._clear_plot()
-        self._log(f"Running inference for '{self.target_col}'...")
-
         # model inference
         X_context = torch.tensor(self.ts_data[start_pos - context_len : start_pos], dtype=torch.float32, device=self.device)
         # X = X_context.repeat(mc_samples, 1).unsqueeze(-1)
         X = X_context.unsqueeze(0).unsqueeze(-1)
-        y_true = self.ts_data[start_pos : start_pos + horizon_len]
+
+        self._log(f"Running inference for '{self.target_col}'...")
 
         try:
             # y_pred = self.model.generate(
@@ -229,11 +234,12 @@ class TimeSeriesExplorerDPG:
             #     horizon_len,
             #     use_mcd=dpg.get_value(self.tags['use_mcd'])
             # ).cpu()
-            y_pred, epistemic = self.model.generate_mcd(
+            self.horizon_data = self.model.generate_bayes(
                 context=X,
                 horizon_len=horizon_len,
                 mc_samples=mc_samples,
-                crn_samples=crn_samples,
+                model_state_samples=bayes_samples,
+                scramble_seed=scramble_seed,
                 max_batch_size=256,
                 buffer_device='cpu'
             )
@@ -242,13 +248,30 @@ class TimeSeriesExplorerDPG:
             self._log(f"Model Inference Exception: {e}", level='error')
             return
         
-        # plotting
+        self._update_plot()
+
+    def _update_plot(self):
+        if self.ts_data is None:
+            self._log("Please select a file and a target column first.", level='warning')
+            return
+        
+        context_len = dpg.get_value(self.tags['context_input'])
+        horizon_len = dpg.get_value(self.tags['horizon_input'])
+        start_pos = dpg.get_value(self.tags['start_pos_input'])
+        mc_samples = dpg.get_value(self.tags['mc_samples_input'])
+        bayes_samples = dpg.get_value(self.tags['bayes_samples_input'])
+        num_bins = dpg.get_value(self.tags['num_bins_input'])
+
+        self._clear_plot()
+        
         t_context = np.arange(start_pos - context_len, start_pos)
         t_horizon = np.arange(start_pos, start_pos + horizon_len)
         context_data = self.ts_data[start_pos - context_len : start_pos]
+        true_data = self.ts_data[start_pos:start_pos + horizon_len]
 
         match dpg.get_value(self.tags['view_mode_combo']):
             case 'Quantiles':
+                y_pred = self.horizon_data.reshape(bayes_samples * mc_samples, horizon_len, 1)
                 quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
                 q_values = np.quantile(y_pred.numpy()[:, :, 0], q=quantiles, axis=0)
                 series_90_ci = dpg.add_shade_series(list(t_horizon), q_values[0].tolist(), y2=q_values[4].tolist(), label='90% CI', parent=self.tags['plot_yaxis'])
@@ -259,7 +282,8 @@ class TimeSeriesExplorerDPG:
                 dpg.bind_item_theme(series_50_ci, self.plot_themes['ci_50'])
                 dpg.bind_item_theme(series_median, self.plot_themes['median'])
             case 'Spaghetti':
-                for i in range(mc_samples):
+                y_pred = self.horizon_data.reshape(bayes_samples * mc_samples, horizon_len, 1)
+                for i in range(mc_samples * bayes_samples):
                     label = 'Forecast Samples' if i == 0 else ''
                     series = dpg.add_line_series(
                         list(t_horizon), 
@@ -269,7 +293,7 @@ class TimeSeriesExplorerDPG:
                     )
                     dpg.bind_item_theme(series, self.plot_themes['ci_90'])
             case 'Box Count':
-                num_bins = mc_samples // 10
+                y_pred = self.horizon_data.reshape(bayes_samples * mc_samples, horizon_len, 1)
                 forecasts = y_pred[:, :, 0].numpy()
                 y_min, y_max = forecasts.min(), forecasts.max()
                 counts = np.apply_along_axis(
@@ -277,7 +301,7 @@ class TimeSeriesExplorerDPG:
                     axis=0,
                     arr=forecasts
                 )
-                dpg.add_heat_series(
+                heat_series = dpg.add_heat_series(
                     counts.flatten().tolist(),
                     rows=num_bins,
                     cols=horizon_len,
@@ -288,19 +312,65 @@ class TimeSeriesExplorerDPG:
                     label="Forecast Distribution",
                     format=''
                 )
-                # dpg.bind_colormap(dpg.last_item(), dpg.mvPlotColormap_RdBu)
+                # dpg.bind_colormap(heat_series, dpg.mvPlotColormap_Viridis)
+            case 'Box Count Decomposition':
+                data = self.horizon_data.numpy()
+                y_min, y_max = data.min().item(), data.max().item()
+                density = np.zeros((bayes_samples, num_bins, horizon_len, 1), dtype=np.int32)
+                # normalised box count for each bayes sample
+                for i in range(bayes_samples):
+                    density[i] = np.apply_along_axis(
+                        lambda mc_rollout_data: np.histogram(
+                            mc_rollout_data,
+                            bins=num_bins,
+                            range=(y_min, y_max),
+                            density=True)[0],
+                        axis=0,
+                        arr=data[0]
+                    )
+                # compute variance between each bayes sample
+                density_var = np.var(density, axis=0)
+                density_mean = np.mean(density, axis=0)
+                max_den, min_den = density_mean.max(), density_mean.min()
+                max_var, min_var = density_mean.max(), density_mean.min()
+
+                density_mean = (density_mean - min_den) / (max_den - min_den)
+                density_var = (density_var - min_var) / (max_var - min_var)
+
+                rgba_image_data = plt.get_cmap('hot')(density_var)
+                rgba_image_data[..., 3] = density_mean
+                rgba_image_data = np.flipud(rgba_image_data)
+
+                final_texture_data = rgba_image_data.flatten().tolist()
+                texture_tag = "density_texture"
+                image_series_tag = "density_image_series"
+                if dpg.does_item_exist(texture_tag):
+                    dpg.delete_item(texture_tag)
+                if dpg.does_item_exist(image_series_tag):
+                    dpg.delete_item(image_series_tag)
+                with dpg.texture_registry():
+                    dpg.add_static_texture(
+                        width=horizon_len,
+                        height=num_bins,
+                        default_value=final_texture_data,
+                        tag=texture_tag
+                    )
+                dpg.add_image_series(
+                    texture_tag,
+                    bounds_min=(start_pos, y_min),
+                    bounds_max=(start_pos + horizon_len, y_max),
+                    parent=self.tags['plot_yaxis'],
+                    tag=image_series_tag
+                )
                 
         series_context = dpg.add_line_series(list(t_context), context_data.tolist(), label='Context', parent=self.tags['plot_yaxis'])
-        series_truth = dpg.add_line_series(list(t_horizon), y_true.tolist(), label='Ground Truth', parent=self.tags['plot_yaxis'])
-        series_epistemic = dpg.add_line_series(list(t_horizon), epistemic[:, 0].tolist(), label='Epistemic Var', parent=self.tags['u_plot_yaxis'])
+        series_truth = dpg.add_line_series(list(t_horizon), true_data.tolist(), label='Ground Truth', parent=self.tags['plot_yaxis'])
         dpg.bind_item_theme(series_context, self.plot_themes['context'])
         dpg.bind_item_theme(series_truth, self.plot_themes['ground_truth'])
-        dpg.bind_item_theme(series_epistemic, self.plot_themes['epistemic'])
 
         dpg.set_item_label(self.tags['plot'], f"Forecast for '{self.target_col}'")
         dpg.fit_axis_data(self.tags['plot_xaxis'])
         dpg.fit_axis_data(self.tags['plot_yaxis'])
-        dpg.fit_axis_data(self.tags['u_plot_yaxis'])
         self._log("Plot updated successfully.", level='info')
 
     def run(self):
