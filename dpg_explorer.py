@@ -6,7 +6,9 @@ import torch
 import torch.distributions.constraints as constraints
 import dearpygui.dearpygui as dpg
 from datetime import datetime
+import matplotlib as mpl
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 
 base_path = os.path.dirname(os.path.abspath(__file__))
@@ -18,6 +20,12 @@ except ImportError:
 
 # for reproducibility in sampling
 torch.manual_seed(0)
+
+colors = ['black', 'blue'] 
+black_purple_cmap = mcolors.LinearSegmentedColormap.from_list(
+    'black_purple', colors, N=256
+)
+mpl.colormaps.register(cmap=black_purple_cmap)
 
 
 
@@ -140,7 +148,7 @@ class TimeSeriesExplorerDPG:
                     with dpg.collapsing_header(label="View Options", default_open=True):
                         dpg.add_combo(
                             label="Forecast View",
-                            items=['Quantiles', 'Spaghetti', 'Box Count', 'Box Count Decomposition'],
+                            items=['Quantiles', 'Spaghetti', 'Density'],
                             default_value='Quantiles',
                             tag=self.tags['view_mode_combo'],
                             callback=self._update_plot
@@ -292,28 +300,7 @@ class TimeSeriesExplorerDPG:
                         parent=self.tags['plot_yaxis']
                     )
                     dpg.bind_item_theme(series, self.plot_themes['ci_90'])
-            case 'Box Count':
-                y_pred = self.horizon_data.reshape(bayes_samples * mc_samples, horizon_len, 1)
-                forecasts = y_pred[:, :, 0].numpy()
-                y_min, y_max = forecasts.min(), forecasts.max()
-                counts = np.apply_along_axis(
-                    lambda x: np.histogram(x, bins=num_bins, range=(y_min, y_max))[0],
-                    axis=0,
-                    arr=forecasts
-                )
-                heat_series = dpg.add_heat_series(
-                    counts.flatten().tolist(),
-                    rows=num_bins,
-                    cols=horizon_len,
-                    bounds_min=(t_horizon[0], y_min),
-                    bounds_max=(t_horizon[-1], y_max),
-                    scale_max = np.max(counts),
-                    parent=self.tags['plot_yaxis'],
-                    label="Forecast Distribution",
-                    format=''
-                )
-                # dpg.bind_colormap(heat_series, dpg.mvPlotColormap_Viridis)
-            case 'Box Count Decomposition':
+            case 'Density':
                 data = self.horizon_data.numpy()
                 y_min, y_max = data.min().item(), data.max().item()
                 density = np.zeros((bayes_samples, num_bins, horizon_len, 1), dtype=np.int32)
@@ -332,14 +319,17 @@ class TimeSeriesExplorerDPG:
                 density_var = np.var(density, axis=0)
                 density_mean = np.mean(density, axis=0)
                 max_den, min_den = density_mean.max(), density_mean.min()
-                max_var, min_var = density_mean.max(), density_mean.min()
+                # max_var, min_var = density_mean.max(), density_mean.min()
 
                 density_mean = (density_mean - min_den) / (max_den - min_den)
-                density_var = (density_var - min_var) / (max_var - min_var)
+                # i think density variance (epistemic uncertianty) is best plotted in same scale as density
+                density_var = (density_var - min_den) / (max_den - min_den)
 
-                rgba_image_data = plt.get_cmap('hot')(density_var)
-                rgba_image_data[..., 3] = density_mean
-                rgba_image_data = np.flipud(rgba_image_data)
+                density_map = plt.get_cmap('hot')(density_mean)
+                var_map = plt.get_cmap('black_purple')(density_mean)
+                total_map = 0.5 * (density_map + var_map)
+                # rgba_image_data[..., 3] = 1 - density_var
+                rgba_image_data = np.flipud(total_map)
 
                 final_texture_data = rgba_image_data.flatten().tolist()
                 texture_tag = "density_texture"
