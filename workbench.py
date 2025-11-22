@@ -5,7 +5,9 @@ Workbench is intended for quick ad hoc experiments using the lightning modules.
 import sys
 import os
 import torch
+import torch.distributions as D
 import torch.distributions.constraints as constraints
+from gluonts.torch.distributions.studentT import StudentT
 import numpy as np
 import pandas as pd
 import pytorch_lightning as L
@@ -18,8 +20,9 @@ if __name__ == '__main__':
     try:
         sys.path.append(base_path)
         from src.lightning.lightning_module import ProbablisticTransformerLightning
+        from src.lightning.callbacks import KLAnnealingCallback
         from src.dataset.synthetic import sinusoidal, brownian_series
-        from src.dataset.torch_datasets import IntervalDataset, collate_pad
+        from src.dataset.torch_datasets import IntervalDataset, collate_pad, ContextHorizonDataset
         from src.dataset.utils import partition
     except ImportError:
         raise RuntimeError("Could not import local modules.")
@@ -30,19 +33,16 @@ if __name__ == '__main__':
     PATIENCE = 16
     MIN_LOSS_DELTA = 0.025
 
-    LEARNING_RATE = 2e-4
-    L2_LAMBDA = 1e-4
+    LEARNING_RATE = 5e-5
+    L2_LAMBDA = 0
+
+    KL_BETA = 1e-5
 
     TRAIN_CXT_SIZE = 256
     TEST_CXT_SIZE = 256
     MODE = {'train', 'plot'}
-
-    series_len = 1024 * 20
-    time_series = sinusoidal(series_len, 1, 0.04, 0, 0.1) + 1
-    df = pd.DataFrame(time_series)
-    df.to_parquet('sinusoidal.parquet')
-
-    # plt.plot(time_series); plt.show()
+    
+    time_series = pd.read_parquet('my_parquet.parquet')['col_name'].to_numpy()
 
     train_ts, val_ts = partition(time_series, TRAIN_RATIO)
 
@@ -55,19 +55,31 @@ if __name__ == '__main__':
     model = ProbablisticTransformerLightning(
         in_dim=1,
         out_dim=1,
-        d_model=256,
+        d_model=128,
         n_head=4,
-        d_ff=512,
-        dropout=0.3,
+        d_ff=256,
+        dropout_embed=0.0,
+        dropout_attn=0.0,
+        dropout_residual=0.0,
         n_layers=4,
         learning_rate=LEARNING_RATE,
         l2_lambda=L2_LAMBDA,
-        dist_cls=torch.distributions.StudentT
+        dist_cls=D.Normal,
+        use_conc_dropout=False,
+        use_var_bayes=True,
+        kl_beta=KL_BETA / len(train_ts),
+        use_stateful_dropout=False
     )
 
     # manually limit the T distribution's degrees of freedom
     model.model.dist_head.const_overrides['df'] = constraints.greater_than(lower_bound=2.1)
 
+    kl_annealing_callback = KLAnnealingCallback(
+        total_anneal_steps=25 * len(train_loader),
+        initial_beta=0,
+        final_beta=KL_BETA / len(train_loader)
+    )
+                
     early_stopper = EarlyStopping(
         monitor="val_loss",
         min_delta=MIN_LOSS_DELTA,
@@ -90,11 +102,17 @@ if __name__ == '__main__':
             max_epochs=MAX_EPOCHS,
             accelerator="auto",
             devices=1,
-            callbacks=[early_stopper, checkpoint_callback],
-            gradient_clip_val=1.0
+            callbacks=[early_stopper, checkpoint_callback, kl_annealing_callback],
+            gradient_clip_val=1.0,
+            log_every_n_steps=1
         )
         trainer.fit(model, train_loader, val_loader)
 
+    
+    if 'calibrate' in MODE:
+        calibration_dataset = ContextHorizonDataset(val_ts, TEST_CXT_SIZE, 10, sample_mode='random', n_samples=500)
+        calibration_loader = DataLoader(calibration_dataset, 1)
+        model.uncertainty_calibration(calibration_loader)
 
     if 'plot' in MODE:
         model = ProbablisticTransformerLightning.load_from_checkpoint(base_path + r'/checkpoints/best.ckpt')
