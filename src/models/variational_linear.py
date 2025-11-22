@@ -61,12 +61,12 @@ class VariationalLinear(nn.Module):
 
     def reset_parameters(self):
         nn.init.kaiming_uniform_(self.w_mu, a=5**0.5)
-        nn.init.constant_(self.w_rho, -7)  # NOTE: I have found that these are extremely important parameters for overall performance
+        nn.init.constant_(self.w_rho, -3)  # NOTE: I have found that these are extremely important parameters for overall performance
         if self.bias:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.w_mu)
             bound = fan_in**-0.5 if fan_in > 0 else 0
             nn.init.uniform_(self.b_mu, -bound, bound)
-            nn.init.constant_(self.b_rho, -5)  # NOTE: here too
+            nn.init.constant_(self.b_rho, -4)  # NOTE: here too
 
     def forward(self, x : torch.Tensor):
         if self.freeze:
