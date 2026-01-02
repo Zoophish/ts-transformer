@@ -43,6 +43,9 @@ class TimeSeriesExplorerDPG:
         self.plot_themes = {}
         self.colormaps = {}
 
+        self.checkbox_tags = []
+        self.plot_target_col = None
+
         self.plot_colors = {
             'context':      (0, 0, 255, 255),
             'ground_truth': (0, 255, 0, 255),
@@ -98,6 +101,7 @@ class TimeSeriesExplorerDPG:
             'u_plot': dpg.generate_uuid(),
             'u_plot_xaxis': dpg.generate_uuid(),
             'u_plot_yaxis': dpg.generate_uuid(),
+            'view_col': dpg.generate_uuid(),
             'context_input': dpg.generate_uuid(),
             'horizon_input': dpg.generate_uuid(),
             'mc_samples_input': dpg.generate_uuid(),
@@ -108,6 +112,7 @@ class TimeSeriesExplorerDPG:
             'log_window': dpg.generate_uuid(),
             'log_group': dpg.generate_uuid(),
             'view_mode_combo': dpg.generate_uuid(),
+            'plot_target_combo': dpg.generate_uuid(),
         }
         self._setup_plot_themes()
         with dpg.window(label="Main", tag="primary_window"):
@@ -147,6 +152,12 @@ class TimeSeriesExplorerDPG:
 
                     with dpg.collapsing_header(label="View Options", default_open=True):
                         dpg.add_combo(
+                            label='Plot Target',
+                            items=[],
+                            tag=self.tags['plot_target_combo'],
+                            callback=self._update_plot
+                        )
+                        dpg.add_combo(
                             label="Forecast View",
                             items=['Quantiles', 'Spaghetti', 'Density'],
                             default_value='Quantiles',
@@ -175,9 +186,12 @@ class TimeSeriesExplorerDPG:
     def _select_file_callback(self, sender, app_data):
         fpath = app_data['file_path_name']
         try:
-            if fpath.endswith('.csv'): self.df = pd.read_csv(fpath)
-            elif fpath.endswith('.parquet'): self.df = pd.read_parquet(fpath)
-            else: raise ValueError("Unsupported file type")
+            if fpath.endswith('.csv'):
+                self.df = pd.read_csv(fpath)
+            elif fpath.endswith('.parquet'):
+                self.df = pd.read_parquet(fpath)
+            else:
+                raise ValueError("Unsupported file type")
             
             file_name = os.path.basename(fpath)
             dpg.set_value(self.tags['file_label'], file_name)
@@ -189,42 +203,51 @@ class TimeSeriesExplorerDPG:
             self._clear_plot()
             self._log(f"Failed to load file: {e}", level='error')
 
+    def get_selected_columns(self):
+        selected_cols = []
+        for tag in self.checkbox_tags:
+            if dpg.get_value(tag):
+                label = dpg.get_item_label(tag)
+                selected_cols.append(label)
+        return selected_cols
+
     def _update_ui_for_new_data(self):
         dpg.set_value(self.tags['file_rows'], f"Rows = {len(self.df)}")
 
-        if dpg.does_item_exist(self.tags['target_col_radio']):
-            dpg.delete_item(self.tags['target_col_radio'])
-        
+        dpg.delete_item(self.tags['target_col_group'], children_only=True)
+
+        self.checkbox_tags = []
+
         columns = self.df.columns.tolist()
-        dpg.add_radio_button(
-            items=columns, tag=self.tags['target_col_radio'],
-            parent=self.tags['target_col_group'],
-            callback=self._set_target_col_callback,
+        
+        for col_name in columns:
+            new_tag = dpg.add_checkbox(
+                label=col_name, 
+                parent=self.tags['target_col_group'],
+                default_value=False
+            )
+            self.checkbox_tags.append(new_tag)
+
+        dpg.configure_item(
+            self.tags['plot_target_combo'], 
+            items=columns, 
             default_value=columns[0]
         )
-        self._set_target_col_callback(None, columns[0])
+
         context_len = dpg.get_value(self.tags['context_input'])
         dpg.set_value(self.tags['start_pos_input'], context_len)
 
-    def _set_target_col_callback(self, sender, app_data):
-        col_name = app_data
-        if self.target_col != col_name:
-            self.target_col = col_name
-            self.ts_data = self.df[self.target_col].to_numpy(dtype=np.float32)
-            self._log(f"Target column set to: {self.target_col}")
-
     def _run_model(self):
-        if self.ts_data is None:
-            self._log("Please select a file and a target column first.", level='warning')
-            return
-
         context_len = dpg.get_value(self.tags['context_input'])
         horizon_len = dpg.get_value(self.tags['horizon_input'])
         start_pos = dpg.get_value(self.tags['start_pos_input'])
         mc_samples = dpg.get_value(self.tags['mc_samples_input'])
         bayes_samples = dpg.get_value(self.tags['bayes_samples_input'])
         scramble_seed = dpg.get_value(self.tags['scramble_seed_input'])
-            
+
+        target_cols = self.get_selected_columns()
+        self.ts_data = self.df[target_cols].to_numpy(dtype=np.float32)
+        
         if start_pos < context_len or start_pos + horizon_len > len(self.ts_data):
             self._log("Invalid Range: The chosen start position, context, and horizon are out of bounds for the data.", level='error')
             return
@@ -232,7 +255,8 @@ class TimeSeriesExplorerDPG:
         # model inference
         X_context = torch.tensor(self.ts_data[start_pos - context_len : start_pos], dtype=torch.float32, device=self.device)
         # X = X_context.repeat(mc_samples, 1).unsqueeze(-1)
-        X = X_context.unsqueeze(0).unsqueeze(-1)
+        # X = X_context.unsqueeze(0).unsqueeze(-1)
+        X = X_context.unsqueeze(0)
 
         self._log(f"Running inference for '{self.target_col}'...")
 
@@ -270,16 +294,19 @@ class TimeSeriesExplorerDPG:
         bayes_samples = dpg.get_value(self.tags['bayes_samples_input'])
         num_bins = dpg.get_value(self.tags['num_bins_input'])
 
+        n_channels = len(self.get_selected_columns())
+        target_idx = self.get_selected_columns().index(dpg.get_value(self.tags['plot_target_combo']))
+
         self._clear_plot()
         
         t_context = np.arange(start_pos - context_len, start_pos)
         t_horizon = np.arange(start_pos, start_pos + horizon_len)
-        context_data = self.ts_data[start_pos - context_len : start_pos]
-        true_data = self.ts_data[start_pos:start_pos + horizon_len]
+        context_data = self.ts_data[start_pos - context_len : start_pos, target_idx]
+        true_data = self.ts_data[start_pos:start_pos + horizon_len, target_idx]
 
         match dpg.get_value(self.tags['view_mode_combo']):
             case 'Quantiles':
-                y_pred = self.horizon_data.reshape(bayes_samples * mc_samples, horizon_len, 1)
+                y_pred = self.horizon_data.reshape(bayes_samples * mc_samples, horizon_len, n_channels)[..., [target_idx]]
                 quantiles = [0.05, 0.25, 0.5, 0.75, 0.95]
                 q_values = np.quantile(y_pred.numpy()[:, :, 0], q=quantiles, axis=0)
                 series_90_ci = dpg.add_shade_series(list(t_horizon), q_values[0].tolist(), y2=q_values[4].tolist(), label='90% CI', parent=self.tags['plot_yaxis'])

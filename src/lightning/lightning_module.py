@@ -7,7 +7,6 @@ from scipy.stats import spearmanr
 
 import pytorch_lightning as L
 
-from ..models.transformer import DecoderTransformer
 from ..models.probablistic_transformer import ProbablisticTransformer
 
 
