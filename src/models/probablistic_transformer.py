@@ -68,9 +68,6 @@ class ProbablisticTransformer(StatefulModule):
         if use_var_bayes:
             self.bayes_units = []
             self._drop_in_variational_bayes(self)
-
-        # self.stateful_modules = []
-        # self._register_stateful_modules(self)
             
     def reset_kv_cache(self):
         self.model.reset_kv_cache()
@@ -82,22 +79,6 @@ class ProbablisticTransformer(StatefulModule):
             decoder_block.attention.force_dropout = state
             getattr(decoder_block.attention.weight_dropout_layer, func_attr)()
             getattr(decoder_block.dropout, func_attr)()
-
-    # def set_generator(self, generator : torch.Generator):
-    #     for stateful_mod in self.stateful_modules:
-    #         stateful_mod.generator = generator
-
-    # def _register_stateful_modules(self, module : nn.Module):
-    #     stateful_mod_types = {
-    #         StatefulDropout,
-    #         ConcreteDropout,
-    #         VariationalLinear
-    #     }
-    #     for child in module.children():
-    #         if type(child) in stateful_mod_types:
-    #             self.stateful_modules.append(child)
-    #         else:
-    #             self._register_stateful_modules(child)
 
     def _drop_in_stateful_dropout(self, module : nn.Module):
         for name, child in module.named_children():

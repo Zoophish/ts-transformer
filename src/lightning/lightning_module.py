@@ -1,13 +1,17 @@
 from typing import Type
+import copy
 
 import torch
+from torch.utils.data import DataLoader
 from torch.distributions import Distribution, Normal
 
 from scipy.stats import spearmanr
 
 import pytorch_lightning as L
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from ..models.probablistic_transformer import ProbablisticTransformer
+from ..models.ensemble import Ensemble
 
 
 class ProbablisticTransformerLightning(L.LightningModule):
@@ -32,30 +36,42 @@ class ProbablisticTransformerLightning(L.LightningModule):
         # variational Bayes by backprop
         use_var_bayes: bool = False,
         kl_beta: float = 1e-4,
-        use_stateful_dropout: bool = True
+        use_stateful_dropout: bool = True,
+        ensemble_n: int = 1
     ):
         super().__init__()
 
         self.save_hyperparameters()
         self.kl_beta = kl_beta
 
-        self.model = ProbablisticTransformer(
-            in_dim=in_dim,
-            out_dim=out_dim,
-            d_model=d_model,
-            n_head=n_head,
-            d_ff=d_ff,
-            dropout_embed=dropout_embed,
-            dropout_attn=dropout_attn,
-            dropout_residual=dropout_residual,
-            n_layers=n_layers,
-            dist_cls=dist_cls,
-            use_conc_dropout=use_conc_dropout,
-            weight_reg=weight_reg,
-            dropout_reg=dropout_reg,
-            use_var_bayes=use_var_bayes,
-            use_stateful_dropout=use_stateful_dropout
-        )
+        model_hparams = {
+            'in_dim': in_dim,
+            'out_dim': out_dim,
+            'd_model': d_model,
+            'n_head': n_head,
+            'd_ff': d_ff,
+            'dropout_embed': dropout_embed,
+            'dropout_attn': dropout_attn,
+            'dropout_residual': dropout_residual,
+            'n_layers': n_layers,
+            'dist_cls': dist_cls,
+            'use_conc_dropout': use_conc_dropout,
+            'weight_reg': weight_reg,
+            'dropout_reg': dropout_reg,
+            'use_var_bayes': use_var_bayes,
+            'use_stateful_dropout': use_stateful_dropout
+        }
+
+        if ensemble_n == 1:
+            self.model = ProbablisticTransformer(**model_hparams)
+        else:
+            self.model = Ensemble(
+                base=ProbablisticTransformer,
+                hyperparams=model_hparams,
+                n = ensemble_n,
+                cache_size=4,
+                path_prefix='ensemble/mdl_'
+            )
 
     def reset_kv_cache(self):
         self.model.reset_kv_cache()
@@ -179,3 +195,49 @@ class ProbablisticTransformerLightning(L.LightningModule):
         print(f"Max {all_epistemic_vars.max().item()}")
         
         return correlation
+    
+
+
+def train_ensemble(
+    module: L.LightningModule,
+    hparams: dict,
+    train_loader : DataLoader,
+    val_loader : DataLoader,
+    n: int,
+    path_prefix: str,
+    trainer_kwargs: dict = None,
+):
+    trainer_kwargs = trainer_kwargs or {}
+    base_callbacks = trainer_kwargs.pop('callbacks', [])
+
+    for i in range(n):
+        print(
+            "\033[1;34m"
+            f"-------------\nEnsemble Model {i}\n-------------"
+            "\033[0m"
+        )
+        # unique checkpoint cb per trainer
+        checkpoint_callback = ModelCheckpoint(
+            monitor="val_loss",
+            dirpath=path_prefix + r'/checkpoints',
+            filename=f'best_{i}',
+            save_top_k=1,
+            mode="min",
+            enable_version_counter=False
+        )
+
+        # training
+        L.seed_everything(i)  # different seed per member
+        model = module(**hparams)
+        trainer = L.Trainer(
+            **trainer_kwargs,
+            callbacks=copy.deepcopy(base_callbacks) + [checkpoint_callback]
+        )
+        trainer.fit(model, train_loader, val_loader)
+
+        # save the best
+        best_model = module.load_from_checkpoint(
+            checkpoint_callback.best_model_path,
+            **hparams
+        )
+        torch.save(best_model.model.state_dict(), f"{path_prefix}_{i}")

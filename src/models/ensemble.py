@@ -18,9 +18,16 @@ class DiskModule(nn.Module):
         self.hyperparams = hyperparams
         self.path = str(path)
         
-        self._model = None 
+        self._model = None
 
-    def load(self, device):
+        # tracks what device this gets loaded onto by .to()
+        self.register_buffer('_device_tracker', torch.empty(0))
+
+    @property
+    def device(self):
+        return self._device_tracker.device
+
+    def load(self):
         if self._model is None:
             # instantiate
             self._model = self.base_cls(**self.hyperparams)
@@ -31,8 +38,8 @@ class DiskModule(nn.Module):
             self._model.load_state_dict(state)
         
         # ensure it's on the right device (even if already loaded)
-        if self._model.device != device:
-            self._model.to(device)
+        if self._model.device != self.device:
+            self._model.to(self.device)
         
         return self
 
@@ -65,12 +72,11 @@ class DiskModuleCache(nn.Module):
     Like a ModuleList, but keeps the most used module weights loaded. Evicts
     (unloads) the least recently used module if the cache size is exceeded.
     """
-    def __init__(self, cache_size: int, device='cpu'):
+    def __init__(self, cache_size: int):
         super().__init__()
         self.disk_modules = nn.ModuleList()
         self.cache_size = cache_size
         self.cache_order = []
-        self.device = device
 
     def clear(self):
         for module in self.disk_modules:
@@ -87,7 +93,7 @@ class DiskModuleCache(nn.Module):
             self.cache_order.insert(0, idx)
         else:
             # load and add to front
-            self.disk_modules[idx].load(self.device)
+            self.disk_modules[idx].load()
             self.cache_order.insert(0, idx)
             # evict LRU if over capacity
             if len(self.cache_order) > self.cache_size:
@@ -125,7 +131,7 @@ class Ensemble(StatefulModule):
         self.base = base
         self.n = n
         self.generator = None
-        self.net = DiskModuleCache()
+        self.net = DiskModuleCache(cache_size)
         self.hyperparams = hyperparams
         self.cache_size = cache_size
         self.path_prefix = path_prefix
@@ -133,13 +139,12 @@ class Ensemble(StatefulModule):
         self.build()
 
     def build(self):
-        name = self.name if self.name is not None else self.base._get_name()
         for i in range(self.n):
             self.net.append(
                 DiskModule(
                     base_cls=self.base,
                     hyperparams=self.hyperparams,
-                    path=f"{name}_{i}"
+                    path=f"{self.path_prefix}_{i}"
                 )
             )
 
@@ -149,10 +154,6 @@ class Ensemble(StatefulModule):
         
         model_idx = torch.randint(0, len(self.net), [1], generator=self.generator).item()
         return self.net[model_idx](*args, **kwargs)
-    
-    def set_generator(self, generator : torch.Generator):
-        for stateful_mod in self.stateful_modules:
-            stateful_mod.generator = generator
     
     def __len__(self):
         return len(self.net)
