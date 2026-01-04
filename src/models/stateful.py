@@ -2,7 +2,23 @@ import torch
 import torch.nn as nn
 
 
-class StatefulDropout(nn.Dropout):
+class StatefulModule(nn.Module):
+    """
+    A module class that references a generator for deterministic stochastic
+    sampling.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.generator = None
+
+    def set_generator(self, generator : torch.Generator):
+        """Sets this module's generator and all stateful modules within it."""
+        for child in self.modules():
+            if isinstance(child, StatefulModule):
+                child.generator = generator
+
+
+class StatefulDropout(nn.Dropout, StatefulModule):
     """
     An extension of regular dropout that enables stateful (deterministic)
     sampling using a random number generator.
@@ -14,7 +30,7 @@ class StatefulDropout(nn.Dropout):
     """
     def __init__(self, p = 0.5, inplace = False):
         super().__init__(p, inplace)
-        self.generator = None
+        # self.generator = None
 
     def forward(
             self,

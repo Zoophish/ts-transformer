@@ -1,5 +1,9 @@
+from typing import Type
+
 import torch
 import torch.nn as nn
+
+from .stateful import StatefulModule
 
 
 class DiskModule(nn.Module):
@@ -98,7 +102,7 @@ class DiskModuleCache(nn.Module):
             self.cache_order.remove(idx)
 
 
-class Ensemble(nn.Module):
+class Ensemble(StatefulModule):
     """
     Ensemble of base models using stateful paradigm.
 
@@ -111,7 +115,7 @@ class Ensemble(nn.Module):
 
     def __init__(
             self,
-            base : nn.Module,
+            base : Type[nn.Module],
             hyperparams : dict,
             n : int = 1,
             cache_size : int = 1,

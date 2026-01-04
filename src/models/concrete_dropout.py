@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import math
 
+from .stateful import StatefulModule
 
-class ConcreteDropout(nn.Module):
+class ConcreteDropout(StatefulModule):
     """
     Concrete Dropout layer based on https://arxiv.org/abs/1705.07832.
 
@@ -34,7 +34,7 @@ class ConcreteDropout(nn.Module):
         self.temp = 0.1
         self.eps = eps
 
-        self.generator = None
+        # self.generator = None
 
     @property
     def p(self):

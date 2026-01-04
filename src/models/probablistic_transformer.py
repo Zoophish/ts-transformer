@@ -6,12 +6,12 @@ from torch.distributions import Distribution, Normal
 from .inst_norm import CausalINLayer
 from .transformer import DecoderTransformer
 from .distribution_head import DistributionHead
-from .stateful import StatefulDropout
+from .stateful import StatefulModule, StatefulDropout
 from .concrete_dropout import ConcreteDropout
 from .variational_linear import VariationalLinear
 
 
-class ProbablisticTransformer(nn.Module):
+class ProbablisticTransformer(StatefulModule):
     """
     Combines the decoder transformer and distribution head for probablistic
     autoregressive predictions.
@@ -69,8 +69,8 @@ class ProbablisticTransformer(nn.Module):
             self.bayes_units = []
             self._drop_in_variational_bayes(self)
 
-        self.stateful_modules = []
-        self._register_stateful_modules(self)
+        # self.stateful_modules = []
+        # self._register_stateful_modules(self)
             
     def reset_kv_cache(self):
         self.model.reset_kv_cache()
@@ -83,21 +83,21 @@ class ProbablisticTransformer(nn.Module):
             getattr(decoder_block.attention.weight_dropout_layer, func_attr)()
             getattr(decoder_block.dropout, func_attr)()
 
-    def set_generator(self, generator : torch.Generator):
-        for stateful_mod in self.stateful_modules:
-            stateful_mod.generator = generator
+    # def set_generator(self, generator : torch.Generator):
+    #     for stateful_mod in self.stateful_modules:
+    #         stateful_mod.generator = generator
 
-    def _register_stateful_modules(self, module : nn.Module):
-        stateful_mod_types = {
-            StatefulDropout,
-            ConcreteDropout,
-            VariationalLinear
-        }
-        for child in module.children():
-            if type(child) in stateful_mod_types:
-                self.stateful_modules.append(child)
-            else:
-                self._register_stateful_modules(child)
+    # def _register_stateful_modules(self, module : nn.Module):
+    #     stateful_mod_types = {
+    #         StatefulDropout,
+    #         ConcreteDropout,
+    #         VariationalLinear
+    #     }
+    #     for child in module.children():
+    #         if type(child) in stateful_mod_types:
+    #             self.stateful_modules.append(child)
+    #         else:
+    #             self._register_stateful_modules(child)
 
     def _drop_in_stateful_dropout(self, module : nn.Module):
         for name, child in module.named_children():

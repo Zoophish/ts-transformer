@@ -3,8 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.distributions as D
 
+from.stateful import StatefulModule
 
-class VariationalLinear(nn.Module):
+
+class VariationalLinear(StatefulModule):
     """
     Variational linear layer following the "Bayes by Backprop"
     paper: https://arxiv.org/abs/1505.05424.
@@ -33,7 +35,7 @@ class VariationalLinear(nn.Module):
         self.use_global_reparam = use_global_reparam
         self.eps = eps
         self.freeze = False
-        self.generator = None
+        # self.generator = None
 
         # the prior is the 'belief'/ideal distribution for weights
         # most priors encourage smaller posterior centers and prevent the 'width' collapsing
