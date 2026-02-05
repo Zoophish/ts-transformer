@@ -218,6 +218,7 @@ class DecoderTransformer(nn.Module):
         ):
         super().__init__()
         self.d_model = d_model
+        # NOTE: remove this
         self.input_projection = nn.Linear(in_dim, d_model)
         self.embed_dropout = nn.Dropout(dropout_embed)
         self.decoder_blocks = nn.ModuleList([

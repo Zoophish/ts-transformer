@@ -75,21 +75,22 @@ class IntervalDataset(torch.utils.data.Dataset):
     """
     Generates single intervals over the time series.
     """
-    def __init__(self, time_series, interval_length : int):
+    def __init__(self, data, interval_length : int):
         super().__init__()
         self.interval_length = interval_length
-        self.time_series = time_series
+        self.data = data
 
     def __len__(self):
-        return len(self.time_series) // self.interval_length
+        return len(self.data) // self.interval_length
     
     def __getitem__(self, idx):
         start_idx = idx * self.interval_length
         end_idx = start_idx + self.interval_length
-        x = torch.tensor(
-            self.time_series[start_idx:end_idx],
-            dtype=torch.float32
-        )
+        # x = torch.tensor(
+        #     self.data[start_idx:end_idx],
+        #     dtype=torch.float32
+        # )
+        x = self.data[start_idx:end_idx]
         if x.dim() == 1:
             x = x.unsqueeze(-1)
         return x

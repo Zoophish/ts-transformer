@@ -408,9 +408,13 @@ class TimeSeriesExplorerDPG:
 
 if __name__ == '__main__':
     try:
-        model_path = os.path.join(base_path, 'checkpoints', 'best.ckpt')
+        # model_path = os.path.join(base_path, 'checkpoints', 'best.ckpt')
+        model_path = os.path.join(base_path, 'ensemble_test')
         if os.path.exists(model_path):
-             model = ProbablisticTransformerLightning.load_from_checkpoint(model_path)
+            #  model = ProbablisticTransformerLightning.load_from_checkpoint(model_path)
+            hparams = torch.load(model_path, weights_only=False)
+            model = ProbablisticTransformerLightning(**hparams)
+            
         else:
             raise RuntimeError("No checkpoint.")
     except Exception as e:

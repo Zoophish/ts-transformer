@@ -1,3 +1,5 @@
+![](media/title.jpg)
+
 # Probablistic Time Series Forecasting using Transformers
 
 ## Highlights
@@ -30,14 +32,14 @@ Stateful components of the model (i.e. components with randomness) such as dropo
 ### Variational Bayes
 There are two options implemented for variational bayes which are 'drop-in': [Monte Carlo Dropout](https://arxiv.org/abs/1506.02142) and [Bayes by Backprop](https://arxiv.org/abs/1505.05424). These attempt to estimate epistemic uncertainty.
 
-There is effectively no performance penalty to MC droput, since it uses the existing dropout layers. Either standard dropout or concrete dropout can be used for this method.
+There is effectively no performance penalty to MC droput, since it uses the existing dropout layers. Concrete dropout layers (slower) can replace the standard dropout layers.
 
-Bayes by Backprop imposes actual distributions over the learnable parameters. It requires more memory and runs slower since it produces twice the number of parameters.
+Bayes by Backprop imposes actual distributions over the learnable base parameters, requiring more memory and compute since it produces two real parameters per base model parameter.
 
 ### Ensembling
 [wip]
 
-The model can be ensembled through many copies of itself using weights trained from different inital conditions. This tends to produce the best approximation of the posterior. The ensemble super class essentially becomes a stateful version of the base model, whereby the state determines the weights used.
+The model can be ensembled through many copies of itself using weights trained from different inital conditions (i.e. different weight noise). This tends to produce the best approximation of the posterior. The ensemble super class essentially becomes a stateful version of the base model, whereby the state determines the weight set used.
 
 ### Uncertainty Decomposition
 
@@ -59,6 +61,9 @@ The `Density` view uses box counting to visualise agreement between samples over
 ## To do:
 - Ensemble super class
 - Time encodings
+- Feature encodings
+- Categorical binning distribution output
+
 - Ensembling (snapshot, weight inits, batch ensembling)
 - MC epistemic regulariser (M>1)
 - Stateful QRN and PRN generators with batching

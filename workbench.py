@@ -15,11 +15,12 @@ from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
+
 if __name__ == '__main__':
     base_path = os.path.dirname(os.path.abspath(__file__))
     try:
         sys.path.append(base_path)
-        from src.lightning.lightning_module import ProbablisticTransformerLightning
+        from src.lightning.lightning_module import ProbablisticTransformerLightning, train_ensemble
         from src.lightning.callbacks import KLAnnealingCallback
         from src.dataset.synthetic import sinusoidal, brownian_series
         from src.dataset.torch_datasets import IntervalDataset, collate_pad, ContextHorizonDataset
@@ -30,8 +31,10 @@ if __name__ == '__main__':
     BATCH_SIZE = 64
     TRAIN_RATIO = 0.8
     MAX_EPOCHS = -1
-    PATIENCE = 16
-    MIN_LOSS_DELTA = 0.025
+    PATIENCE = 4
+    MIN_LOSS_DELTA = 0.1
+
+    ENSEMBLE_SIZE = 4
 
     LEARNING_RATE = 5e-5
     L2_LAMBDA = 0
@@ -40,9 +43,14 @@ if __name__ == '__main__':
 
     TRAIN_CXT_SIZE = 256
     TEST_CXT_SIZE = 256
-    MODE = {'train', 'plot'}
+    MODE = {'train_ensemble'}#, 'plot'}
     
-    time_series = pd.read_parquet('my_parquet.parquet')['col_name'].to_numpy()
+    df = pd.read_parquet('JOBY_Agg_1min.parquet')
+    vol_ts = df['volume'].to_numpy()
+    close_ts = df['close'].to_numpy()
+    time_series = np.stack([close_ts, vol_ts], axis=-1)
+    
+    time_series = torch.tensor(time_series, dtype=torch.float32)
 
     train_ts, val_ts = partition(time_series, TRAIN_RATIO)
 
@@ -52,24 +60,26 @@ if __name__ == '__main__':
     train_loader = DataLoader(train_dataset, BATCH_SIZE, shuffle=True, collate_fn=collate_pad)
     val_loader = DataLoader(val_dataset, BATCH_SIZE, shuffle=False, collate_fn=collate_pad)
 
-    model = ProbablisticTransformerLightning(
-        in_dim=1,
-        out_dim=1,
-        d_model=128,
-        n_head=4,
-        d_ff=256,
-        dropout_embed=0.0,
-        dropout_attn=0.0,
-        dropout_residual=0.0,
-        n_layers=4,
-        learning_rate=LEARNING_RATE,
-        l2_lambda=L2_LAMBDA,
-        dist_cls=D.Normal,
-        use_conc_dropout=False,
-        use_var_bayes=True,
-        kl_beta=KL_BETA / len(train_ts),
-        use_stateful_dropout=False
-    )
+    hparams = {
+        'in_dim': 2,
+        'out_dim': 2,
+        'd_model': 128,
+        'n_head': 4,
+        'd_ff': 256,
+        'dropout_embed': 0.0,
+        'dropout_attn': 0.0,
+        'dropout_residual': 0.0,
+        'n_layers': 4,
+        'learning_rate': LEARNING_RATE,
+        'l2_lambda': L2_LAMBDA,
+        'dist_cls': D.Normal,
+        'use_conc_dropout': False,
+        'use_var_bayes':True,
+        'kl_beta': KL_BETA / len(train_ts),
+        'use_stateful_dropout': False
+    }
+
+    model = ProbablisticTransformerLightning(**hparams)
 
     # manually limit the T distribution's degrees of freedom
     model.model.dist_head.const_overrides['df'] = constraints.greater_than(lower_bound=2.1)
@@ -79,7 +89,7 @@ if __name__ == '__main__':
         initial_beta=0,
         final_beta=KL_BETA / len(train_loader)
     )
-                
+
     early_stopper = EarlyStopping(
         monitor="val_loss",
         min_delta=MIN_LOSS_DELTA,
@@ -108,6 +118,25 @@ if __name__ == '__main__':
         )
         trainer.fit(model, train_loader, val_loader)
 
+    if 'train_ensemble' in MODE:
+        train_ensemble(
+            module=ProbablisticTransformerLightning,
+            hparams=hparams,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            n=ENSEMBLE_SIZE,
+            path_prefix='ensemble/mdl',
+            trainer_kwargs={
+                'max_epochs': MAX_EPOCHS,
+                'accelerator': "auto",
+                'devices': 1,
+                'callbacks': [early_stopper, ],
+                'gradient_clip_val': 1.0,
+                'log_every_n_steps': 1
+            }
+        )
+        ensemble_hparams = {**hparams, 'ensemble_n': ENSEMBLE_SIZE}
+        torch.save(ensemble_hparams, "ensemble_hparams")
     
     if 'calibrate' in MODE:
         calibration_dataset = ContextHorizonDataset(val_ts, TEST_CXT_SIZE, 10, sample_mode='random', n_samples=500)

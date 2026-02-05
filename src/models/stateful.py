@@ -30,7 +30,6 @@ class StatefulDropout(nn.Dropout, StatefulModule):
     """
     def __init__(self, p = 0.5, inplace = False):
         super().__init__(p, inplace)
-        # self.generator = None
 
     def forward(
             self,

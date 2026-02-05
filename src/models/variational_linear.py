@@ -35,7 +35,6 @@ class VariationalLinear(StatefulModule):
         self.use_global_reparam = use_global_reparam
         self.eps = eps
         self.freeze = False
-        # self.generator = None
 
         # the prior is the 'belief'/ideal distribution for weights
         # most priors encourage smaller posterior centers and prevent the 'width' collapsing

@@ -34,8 +34,6 @@ class ConcreteDropout(StatefulModule):
         self.temp = 0.1
         self.eps = eps
 
-        # self.generator = None
-
     @property
     def p(self):
         return torch.sigmoid(self.p_logit).detach().item()
